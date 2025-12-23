@@ -1,0 +1,1322 @@
+﻿using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Text;
+
+namespace CayleyTablesFinal
+{
+    class Program
+    {
+        static int n;
+        static string resultsBaseDir;
+        static string currentRunDir;
+        static Stopwatch totalTimer = new Stopwatch();
+        static Stopwatch dimensionTimer = new Stopwatch();
+
+        static Dictionary<int, DimensionStats> stats = new Dictionary<int, DimensionStats>();
+        static int nextTableId = 1;
+        static int nextGroupId = 1;
+        static object idLock = new object();
+
+        static void Main(string[] args)
+        {
+            Console.WriteLine("╔══════════════════════════════════════════════════════════╗");
+            Console.WriteLine("║            ФИНАЛЬНЫЙ АНАЛИЗАТОР ТАБЛИЦ КЭЛИ             ║");
+            Console.WriteLine("║     (с детальной проверкой изоморфизма и операций)      ║");
+            Console.WriteLine("╚══════════════════════════════════════════════════════════╝");
+            Console.WriteLine();
+            Console.WriteLine($"Время запуска: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            Console.WriteLine();
+
+            Console.WriteLine("Введите размерности через пробел (2-10):");
+            Console.Write("> ");
+            string input = Console.ReadLine();
+
+            if (string.IsNullOrWhiteSpace(input))
+            {
+                Console.WriteLine("Используются размерности по умолчанию: 4 5 6");
+                input = "4 5 6";
+            }
+
+            var dimensions = ParseDimensions(input);
+
+            string timestamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+            resultsBaseDir = $"CayleyResults_Final_{timestamp}";
+            Directory.CreateDirectory(resultsBaseDir);
+
+            totalTimer.Start();
+
+            foreach (int dimension in dimensions)
+            {
+                dimensionTimer.Restart();
+
+                Console.WriteLine();
+                Console.WriteLine("┌──────────────────────────────────────────────────────┐");
+                Console.WriteLine($"│ ОБРАБОТКА РАЗМЕРНОСТИ n = {dimension,-3}                          │");
+                Console.WriteLine("└──────────────────────────────────────────────────────┘");
+
+                n = dimension;
+                currentRunDir = Path.Combine(resultsBaseDir, $"n{dimension}");
+                Directory.CreateDirectory(currentRunDir);
+
+                try
+                {
+                    ProcessDimension(dimension);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Ошибка: {ex.Message}");
+                    LogError(dimension, ex);
+                }
+
+                dimensionTimer.Stop();
+                Console.WriteLine($"✓ Завершено за {dimensionTimer.Elapsed.TotalSeconds:F1} сек");
+            }
+
+            totalTimer.Stop();
+
+            Console.WriteLine();
+            Console.WriteLine("════════════════════════════════════════════════════════");
+            Console.WriteLine("              ВСЕ РАСЧЕТЫ ЗАВЕРШЕНЫ!");
+            Console.WriteLine($"        Общее время: {totalTimer.Elapsed.TotalMinutes:F1} минут");
+            Console.WriteLine($"   Результаты сохранены в: {resultsBaseDir}");
+            Console.WriteLine("════════════════════════════════════════════════════════");
+        }
+
+        static List<int> ParseDimensions(string input)
+        {
+            var result = new List<int>();
+            var parts = input.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+            foreach (var part in parts)
+            {
+                if (int.TryParse(part, out int dim) && dim >= 2 && dim <= 10)
+                {
+                    result.Add(dim);
+                }
+            }
+
+            return result.Distinct().OrderBy(x => x).ToList();
+        }
+
+        static void ProcessDimension(int dimension)
+        {
+            var dimStats = new DimensionStats { Dimension = dimension };
+            stats[dimension] = dimStats;
+
+            Console.WriteLine($"Этап 1/4: Генерация латинских квадратов...");
+            var latinSquares = GenerateLatinSquaresWithFixedFirstRowCol();
+            dimStats.TotalTables = latinSquares.Count;
+            Console.WriteLine($"   Сгенерировано таблиц: {latinSquares.Count:N0}");
+
+            Console.WriteLine($"Этап 2/4: Проверка на свойства группы...");
+            var (groups, nonGroups) = CheckAllTables(latinSquares);
+            dimStats.TotalGroups = groups.Count;
+            dimStats.NonGroups = nonGroups.Count;
+            Console.WriteLine($"   Групп: {groups.Count}, Не групп: {nonGroups.Count}");
+
+            Console.WriteLine($"Этап 3/4: Классификация изоморфизма...");
+            var classification = ClassifyGroupsCorrectly(groups);
+            dimStats.IsomorphismClasses = classification.Classes.Count;
+            Console.WriteLine($"   Классов изоморфизма: {classification.Classes.Count}");
+
+            Console.WriteLine($"Этап 4/4: Сохранение результатов...");
+            SaveAllResultsWithDetailedIsomorphisms(nonGroups, groups, classification, dimStats);
+
+            Console.WriteLine($"✓ Для n={dimension}: {groups.Count} групп → {classification.Classes.Count} классов");
+        }
+        
+        static List<int[,]> GenerateLatinSquaresWithFixedFirstRowCol()
+        {
+            var squares = new List<int[,]>();
+
+            int[,] square = new int[n, n];
+            bool[,] rowUsed = new bool[n, n];
+            bool[,] colUsed = new bool[n, n];
+
+            for (int j = 0; j < n; j++)
+            {
+                square[0, j] = j;
+                rowUsed[0, j] = true;
+                colUsed[j, j] = true;
+            }
+
+            for (int i = 0; i < n; i++)
+            {
+                square[i, 0] = i;
+                rowUsed[i, i] = true;
+                colUsed[0, i] = true;
+            }
+
+            FillLatinSquareRecursive(square, 1, 1, rowUsed, colUsed, squares);
+            return squares;
+        }
+
+        static void FillLatinSquareRecursive(int[,] square, int row, int col,
+            bool[,] rowUsed, bool[,] colUsed, List<int[,]> result)
+        {
+            if (row == n)
+            {
+                result.Add((int[,])square.Clone());
+                return;
+            }
+
+            if (col == n)
+            {
+                FillLatinSquareRecursive(square, row + 1, 1, rowUsed, colUsed, result);
+                return;
+            }
+
+            for (int val = 0; val < n; val++)
+            {
+                if (!rowUsed[row, val] && !colUsed[col, val])
+                {
+                    square[row, col] = val;
+                    rowUsed[row, val] = true;
+                    colUsed[col, val] = true;
+
+                    FillLatinSquareRecursive(square, row, col + 1, rowUsed, colUsed, result);
+
+                    rowUsed[row, val] = false;
+                    colUsed[col, val] = false;
+                }
+            }
+        }
+
+        static (List<GroupData> groups, List<NonGroupData> nonGroups)
+            CheckAllTables(List<int[,]> tables)
+        {
+            var groups = new ConcurrentBag<GroupData>();
+            var nonGroups = new ConcurrentBag<NonGroupData>();
+            int processed = 0;
+            int total = tables.Count;
+            object consoleLock = new object();
+
+            Parallel.ForEach(tables, table =>
+            {
+                var result = CheckGroupPropertiesDetailed(table);
+
+                if (result.IsGroup)
+                {
+                    int id;
+                    lock (idLock) { id = nextGroupId++; }
+
+                    groups.Add(new GroupData
+                    {
+                        Id = id,
+                        Table = (int[,])table.Clone(),
+                        Identity = result.Identity!.Value,
+                        IsAbelian = result.IsAbelian,
+                        ElementOrders = result.ElementOrders!,
+                        Inverses = result.Inverses!,
+                        IsCyclic = result.IsCyclic,
+                        GroupType = DetermineGroupTypeFromProperties(
+                            result.IsCyclic, result.IsAbelian, result.ElementOrders!, n)
+                    });
+                }
+                else
+                {
+                    int id;
+                    lock (idLock) { id = nextTableId++; }
+
+                    nonGroups.Add(new NonGroupData
+                    {
+                        Id = id,
+                        Table = (int[,])table.Clone(),
+                        FailedReason = result.FailedReason!,
+                        FailedDetails = result.FailedDetails!,
+                        FailedAxiom = result.FailedAxiom,
+                        FailedExample = result.FailedExample,
+                        HasIdentity = result.HasIdentity,
+                        IdentityElement = result.Identity,
+                        ElementOrders = result.ElementOrders ?? new int[n]
+                    });
+                }
+
+                int current = Interlocked.Increment(ref processed);
+                if (current % Math.Max(1, total / 100) == 0)
+                {
+                    lock (consoleLock)
+                    {
+                        Console.Write($"\r   Проверено: {current:N0}/{total:N0} ({(double)current / total * 100:F0}%)");
+                    }
+                }
+            });
+
+            Console.WriteLine();
+            return (groups.ToList(), nonGroups.ToList());
+        }
+    
+        static GroupCheckResult CheckGroupPropertiesDetailed(int[,] table)
+        {
+            // 1. Проверка нейтрального элемента
+            int? identity = null;
+            bool hasIdentity = false;
+
+            for (int e = 0; e < n; e++)
+            {
+                bool isIdentity = true;
+                for (int i = 0; i < n; i++)
+                {
+                    if (table[e, i] != i || table[i, e] != i)
+                    {
+                        isIdentity = false;
+                        break;
+                    }
+                }
+                if (isIdentity)
+                {
+                    identity = e;
+                    hasIdentity = true;
+                    break;
+                }
+            }
+
+            if (!hasIdentity)
+            {
+                int[] orders = new int[n];
+                for (int i = 0; i < n; i++) orders[i] = -1;
+
+                return GroupCheckResult.NotGroup(
+                    "Нет нейтрального элемента",
+                    "Не существует элемента e такого, что e*a = a*e = a для всех a",
+                    "Нет нейтрального элемента",
+                    "∀e ∃a: e*a ≠ a или a*e ≠ a",
+                    false, null, orders);
+            }
+
+            // 2. Проверка обратных элементов
+            int[] inverses = new int[n];
+            bool allHaveInverses = true;
+            string failedInverseExample = "";
+
+            for (int a = 0; a < n; a++)
+            {
+                bool foundInverse = false;
+                for (int b = 0; b < n; b++)
+                {
+                    if (table[a, b] == identity && table[b, a] == identity)
+                    {
+                        inverses[a] = b;
+                        foundInverse = true;
+                        break;
+                    }
+                }
+
+                if (!foundInverse)
+                {
+                    allHaveInverses = false;
+                    failedInverseExample = $"Элемент {a} не имеет обратного";
+                    break;
+                }
+            }
+
+            if (!allHaveInverses)
+            {
+                int[] elementOrders1 = CalculateElementOrders(table, identity.Value);
+                return GroupCheckResult.NotGroup(
+                    "Нет обратного элемента",
+                    failedInverseExample,
+                    "Нет обратного элемента",
+                    failedInverseExample,
+                    true, identity, elementOrders1);
+            }
+
+            // 3. Проверка ассоциативности
+            bool isAssociative = true;
+            string failedAssocExample = "";
+
+            for (int a = 0; a < n && isAssociative; a++)
+            {
+                for (int b = 0; b < n && isAssociative; b++)
+                {
+                    for (int c = 0; c < n && isAssociative; c++)
+                    {
+                        int ab = table[a, b];
+                        int bc = table[b, c];
+
+                        if (table[ab, c] != table[a, bc])
+                        {
+                            isAssociative = false;
+                            failedAssocExample = $"({a}*{b})*{c} = {table[ab, c]}, {a}*({b}*{c}) = {table[a, bc]}";
+                        }
+                    }
+                }
+            }
+
+            if (!isAssociative)
+            {
+                int[] elementOrders2 = CalculateElementOrders(table, identity.Value);
+                return GroupCheckResult.NotGroup(
+                    "Нарушена ассоциативность",
+                    failedAssocExample,
+                    "Нарушена ассоциативность",
+                    failedAssocExample,
+                    true, identity, elementOrders2);
+            }
+
+            // 4. Порядки элементов
+            int[] elementOrders3 = CalculateElementOrders(table, identity.Value);
+
+            // 5. Проверка коммутативности
+            bool isAbelian = true;
+            for (int i = 0; i < n && isAbelian; i++)
+            {
+                for (int j = i + 1; j < n && isAbelian; j++)
+                {
+                    if (table[i, j] != table[j, i]) isAbelian = false;
+                }
+            }
+
+            // 6. Проверка цикличности
+            bool isCyclic = IsCyclicGroup(table, identity.Value);
+
+            return GroupCheckResult.Group(
+                identity.Value, elementOrders3, inverses, isAbelian, isCyclic);
+        }
+
+        static ClassificationResult ClassifyGroupsCorrectly(List<GroupData> groups)
+        {
+            var result = new ClassificationResult();
+
+            if (groups.Count == 0) return result;
+
+            // Группируем по типу группы
+            var groupsByType = groups.GroupBy(g => g.GroupType).ToList();
+
+            int classId = 1;
+
+            foreach (var typeGroup in groupsByType)
+            {
+                var groupsOfThisType = typeGroup.ToList();
+
+                if (groupsOfThisType.Count == 1)
+                {
+                    result.Classes.Add(new IsomorphismClass
+                    {
+                        Id = classId++,
+                        GroupType = typeGroup.Key,
+                        Groups = groupsOfThisType,
+                        Representative = groupsOfThisType[0]
+                    });
+                }
+                else
+                {
+                    // Проверяем попарно на изоморфизм
+                    var visited = new bool[groupsOfThisType.Count];
+
+                    for (int i = 0; i < groupsOfThisType.Count; i++)
+                    {
+                        if (visited[i]) continue;
+
+                        var currentClass = new List<GroupData> { groupsOfThisType[i] };
+                        visited[i] = true;
+
+                        for (int j = i + 1; j < groupsOfThisType.Count; j++)
+                        {
+                            if (visited[j]) continue;
+
+                            if (FindDetailedIsomorphism(groupsOfThisType[i], groupsOfThisType[j],
+                                out var isomorphism))
+                            {
+                                currentClass.Add(groupsOfThisType[j]);
+                                visited[j] = true;
+                            }
+                        }
+
+                        result.Classes.Add(new IsomorphismClass
+                        {
+                            Id = classId++,
+                            GroupType = typeGroup.Key,
+                            Groups = currentClass,
+                            Representative = currentClass[0]
+                        });
+                    }
+                }
+            }
+
+            // Находим изоморфизмы внутри классов
+            foreach (var cls in result.Classes)
+            {
+                for (int i = 0; i < cls.Groups.Count; i++)
+                {
+                    for (int j = i + 1; j < cls.Groups.Count; j++)
+                    {
+                        if (FindDetailedIsomorphism(cls.Groups[i], cls.Groups[j], out var isomorphism))
+                        {
+                            cls.Isomorphisms.Add(isomorphism);
+                        }
+                    }
+                }
+            }
+
+            return result;
+        }
+        
+        static bool FindDetailedIsomorphism(GroupData g1, GroupData g2, out GroupIsomorphism isomorphism)
+        {
+            isomorphism = null;
+
+            // Быстрые проверки
+            if (g1.GroupType != g2.GroupType) return false;
+
+            // Перебираем все биекции
+            var permutations = GetPermutations(Enumerable.Range(0, n).ToArray());
+
+            foreach (var perm in permutations)
+            {
+                // Проверяем, что нейтральный переходит в нейтральный
+                if (perm[g1.Identity] != g2.Identity) continue;
+
+                bool isIsomorphism = true;
+                var failedPairs = new List<string>();
+
+                // Проверяем сохранение операции
+                for (int a = 0; a < n && isIsomorphism; a++)
+                {
+                    for (int b = 0; b < n && isIsomorphism; b++)
+                    {
+                        int ab_g1 = g1.Table[a, b];
+                        int f_ab = perm[ab_g1];
+                        int f_a_f_b = g2.Table[perm[a], perm[b]];
+
+                        if (f_ab != f_a_f_b)
+                        {
+                            isIsomorphism = false;
+                            failedPairs.Add($"f({a}*{b}) = f({ab_g1}) = {perm[ab_g1]}, но f({a})*f({b}) = {perm[a]}*{perm[b]} = {g2.Table[perm[a], perm[b]]}");
+                        }
+                    }
+                }
+
+                if (isIsomorphism)
+                {
+                    int[] inverse = new int[n];
+                    for (int i = 0; i < n; i++) inverse[perm[i]] = i;
+
+                    // Строим подробное описание изоморфизма
+                    var verificationDetails = new StringBuilder();
+                    verificationDetails.AppendLine("Проверка сохранения операции f(a*b) = f(a)*f(b):");
+                    verificationDetails.AppendLine("  Все пары (a,b) проверены успешно");
+                    verificationDetails.AppendLine("  Примеры проверки:");
+
+                    // Добавляем несколько примеров
+                    for (int i = 0; i < Math.Min(5, n); i++)
+                    {
+                        for (int j = 0; j < Math.Min(5, n); j++)
+                        {
+                            int ab_g1 = g1.Table[i, j];
+                            verificationDetails.AppendLine($"    f({i}*{j}) = f({ab_g1}) = {perm[ab_g1]}");
+                            verificationDetails.AppendLine($"    f({i})*f({j}) = {perm[i]}*{perm[j]} = {g2.Table[perm[i], perm[j]]}");
+                            verificationDetails.AppendLine($"    ✓ f({i}*{j}) = f({i})*f({j})");
+                        }
+                    }
+
+                    isomorphism = new GroupIsomorphism
+                    {
+                        FromGroup = g1,
+                        ToGroup = g2,
+                        Permutation = perm,
+                        InversePermutation = inverse,
+                        VerificationDetails = verificationDetails.ToString(),
+                        FailedPairs = new List<string>() // Пустой список, так как изоморфизм найден
+                    };
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        static bool FindNonIsomorphismReason(GroupData g1, GroupData g2, out NonIsomorphismInfo info)
+        {
+            info = new NonIsomorphismInfo();
+
+            // 1. Проверяем порядки элементов
+            var orders1 = g1.ElementOrders.OrderBy(x => x).ToArray();
+            var orders2 = g2.ElementOrders.OrderBy(x => x).ToArray();
+
+            if (!orders1.SequenceEqual(orders2))
+            {
+                info.Reason = "Разные порядки элементов";
+                info.Details = $"Порядки элементов в группе #{g1.Id}: [{string.Join(", ", orders1)}]\n" +
+                              $"Порядки элементов в группе #{g2.Id}: [{string.Join(", ", orders2)}]";
+                return true;
+            }
+
+            // 2. Проверяем коммутативность
+            if (g1.IsAbelian != g2.IsAbelian)
+            {
+                info.Reason = "Разная коммутативность";
+                info.Details = $"Группа #{g1.Id} {(g1.IsAbelian ? "абелева" : "неабелева")}, " +
+                              $"Группа #{g2.Id} {(g2.IsAbelian ? "абелева" : "неабелева")}";
+                return true;
+            }
+
+            // 3. Проверяем цикличность
+            if (g1.IsCyclic != g2.IsCyclic)
+            {
+                info.Reason = "Разная цикличность";
+                info.Details = $"Группа #{g1.Id} {(g1.IsCyclic ? "циклическая" : "нециклическая")}, " +
+                              $"Группа #{g2.Id} {(g2.IsCyclic ? "циклическая" : "нециклическая")}";
+                return true;
+            }
+
+            // 4. Пытаемся найти контрпример для изоморфизма
+            info.Reason = "Не найдена биекция, сохраняющая операцию";
+            info.Details = "Для всех возможных биекций f: G → H найдена хотя бы одна пара (a,b), для которой f(a*b) ≠ f(a)*f(b)";
+
+            // Пробуем найти конкретный контрпример
+            var permutations = GetPermutations(Enumerable.Range(0, n).ToArray()).Take(100); // Ограничим перебор
+
+            foreach (var perm in permutations)
+            {
+                if (perm[g1.Identity] != g2.Identity) continue;
+
+                for (int a = 0; a < n; a++)
+                {
+                    for (int b = 0; b < n; b++)
+                    {
+                        int ab_g1 = g1.Table[a, b];
+                        int f_ab = perm[ab_g1];
+                        int f_a_f_b = g2.Table[perm[a], perm[b]];
+
+                        if (f_ab != f_a_f_b)
+                        {
+                            info.Counterexample = $"Для биекции f: {string.Join(",", perm.Select((p, i) => $"{i}→{p}"))}\n" +
+                                                $"f({a}*{b}) = f({ab_g1}) = {perm[ab_g1]}, но f({a})*f({b}) = {perm[a]}*{perm[b]} = {g2.Table[perm[a], perm[b]]}";
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        static string DetermineGroupTypeFromProperties(bool isCyclic, bool isAbelian, int[] orders, int n)
+        {
+            if (isCyclic) return $"C{n} (Циклическая)";
+
+            if (n == 4 && !isCyclic && isAbelian && orders.Count(o => o == 2) == 3)
+                return "V4 (Группа Клейна)";
+
+            if (n == 6 && !isAbelian && orders.Count(o => o == 3) >= 2)
+                return "S3 (Симметрическая)";
+
+            if (n == 6 && isAbelian && orders.Contains(6))
+                return $"C{n} (Циклическая)";
+
+            if (n == 6 && isAbelian && !orders.Contains(6))
+                return "C2×C3 (Прямое произведение)";
+
+            return isAbelian ? $"Абелева группа порядка {n}" : $"Неабелева группа порядка {n}";
+        }
+
+        static int[] CalculateElementOrders(int[,] table, int identity)
+        {
+            int[] orders = new int[n];
+
+            for (int a = 0; a < n; a++)
+            {
+                int order = 1;
+                int current = a;
+
+                while (current != identity && order <= n * 2)
+                {
+                    current = table[a, current];
+                    order++;
+                }
+
+                orders[a] = (current == identity) ? order : -1;
+            }
+
+            return orders;
+        }
+
+        static bool IsCyclicGroup(int[,] table, int identity)
+        {
+            for (int a = 0; a < n; a++)
+            {
+                if (a == identity) continue;
+
+                var generated = new HashSet<int> { a };
+                int current = a;
+
+                for (int k = 0; k < n; k++)
+                {
+                    current = table[a, current];
+                    generated.Add(current);
+                    if (generated.Count == n) return true;
+                }
+            }
+
+            return false;
+        }
+
+        static void SaveAllResultsWithDetailedIsomorphisms(
+            List<NonGroupData> nonGroups,
+            List<GroupData> groups,
+            ClassificationResult classification,
+            DimensionStats dimStats)
+        {
+            SaveNonGroupsFile(nonGroups);
+            SaveAllGroupsFile(groups);
+            SaveIsomorphismClassesFile(classification);
+            SaveDetailedIsomorphismsFile(classification);
+            SaveNonIsomorphismsFile(classification);
+            SaveStatisticsFile(dimStats, classification, groups.Count, nonGroups.Count);
+            SaveFullReportFile(nonGroups, groups, classification, dimStats);
+        }
+
+        static void SaveNonGroupsFile(List<NonGroupData> nonGroups)
+        {
+            string filePath = Path.Combine(currentRunDir, "01_Non_Groups.txt");
+
+            using var writer = new StreamWriter(filePath, false, Encoding.UTF8);
+
+            writer.WriteLine("╔══════════════════════════════════════════════════════════╗");
+            writer.WriteLine("║                ТАБЛИЦЫ, НЕ ЯВЛЯЮЩИЕСЯ ГРУППАМИ           ║");
+            writer.WriteLine("║                   (с подробным объяснением)              ║");
+            writer.WriteLine("╚══════════════════════════════════════════════════════════╝");
+            writer.WriteLine();
+            writer.WriteLine($"Размерность: n = {n}");
+            writer.WriteLine($"Всего таблиц: {nonGroups.Count}");
+            writer.WriteLine();
+
+            for (int i = 0; i < Math.Min(nonGroups.Count, 50); i++)
+            {
+                var ng = nonGroups[i];
+
+                writer.WriteLine($"┌{new string('─', 58)}┐");
+                writer.WriteLine($"│ ТАБЛИЦА #{ng.Id,-4}                                                  │");
+                writer.WriteLine($"├{new string('─', 58)}┤");
+
+                writer.WriteLine("│ Таблица Кэли:                                                      │");
+                writer.WriteLine(FormatTableForFile(ng.Table));
+
+                writer.WriteLine($"│ ПРИЧИНА: {ng.FailedReason,-47}│");
+                writer.WriteLine($"│ Пример: {ng.FailedExample,-49}│");
+                writer.WriteLine($"│ Аксиома: {ng.FailedAxiom,-48}│");
+                writer.WriteLine("│                                                                      │");
+
+                if (ng.HasIdentity)
+                {
+                    writer.WriteLine($"│ Нейтральный элемент: {ng.IdentityElement,-39}│");
+                }
+
+                if (ng.ElementOrders != null && ng.ElementOrders.Length > 0)
+                {
+                    writer.WriteLine("│ Порядки элементов:                                                │");
+                    for (int row = 0; row < (n + 3) / 4; row++)
+                    {
+                        var line = new StringBuilder("│   ");
+                        for (int col = 0; col < 4; col++)
+                        {
+                            int idx = row * 4 + col;
+                            if (idx < n)
+                            {
+                                line.Append($"{idx}:{ng.ElementOrders[idx]}  ");
+                            }
+                        }
+                        line.Append(new string(' ', 58 - line.Length + 1)).Append("│");
+                        writer.WriteLine(line.ToString());
+                    }
+                }
+
+                writer.WriteLine($"└{new string('─', 58)}┘");
+                writer.WriteLine();
+            }
+
+            if (nonGroups.Count > 50)
+            {
+                writer.WriteLine($"... и еще {nonGroups.Count - 50} таблиц.");
+            }
+        }
+
+        static void SaveAllGroupsFile(List<GroupData> groups)
+        {
+            string filePath = Path.Combine(currentRunDir, "02_All_Groups.txt");
+
+            using var writer = new StreamWriter(filePath, false, Encoding.UTF8);
+
+            writer.WriteLine("╔══════════════════════════════════════════════════════════╗");
+            writer.WriteLine("║                    ВСЕ НАЙДЕННЫЕ ГРУППЫ                  ║");
+            writer.WriteLine("╚══════════════════════════════════════════════════════════╝");
+            writer.WriteLine();
+            writer.WriteLine($"Размерность: n = {n}");
+            writer.WriteLine($"Всего групп: {groups.Count}");
+            writer.WriteLine();
+
+            foreach (var g in groups)
+            {
+                writer.WriteLine($"┌{new string('─', 58)}┐");
+                writer.WriteLine($"│ ГРУППА #{g.Id,-4} (Тип: {g.GroupType,-30}) │");
+                writer.WriteLine($"├{new string('─', 58)}┤");
+
+                writer.WriteLine("│ Таблица Кэли:                                                      │");
+                writer.WriteLine(FormatTableForFile(g.Table));
+
+                writer.WriteLine($"│ СВОЙСТВА ГРУППЫ:                                                  │");
+                writer.WriteLine($"│   • Нейтральный элемент: {g.Identity,-39}│");
+                writer.WriteLine($"│   • Абелева: {(g.IsAbelian ? "Да" : "Нет"),-46}│");
+                writer.WriteLine($"│   • Циклическая: {(g.IsCyclic ? "Да" : "Нет"),-44}│");
+                writer.WriteLine($"│   • Тип: {g.GroupType,-45}│");
+
+                writer.WriteLine("│   • Порядки элементов:                                            │");
+                for (int row = 0; row < (n + 3) / 4; row++)
+                {
+                    var line = new StringBuilder("│       ");
+                    for (int col = 0; col < 4; col++)
+                    {
+                        int idx = row * 4 + col;
+                        if (idx < n)
+                        {
+                            line.Append($"{idx}:{g.ElementOrders[idx],2}  ");
+                        }
+                    }
+                    line.Append(new string(' ', 58 - line.Length + 1)).Append("│");
+                    writer.WriteLine(line.ToString());
+                }
+
+                writer.WriteLine($"└{new string('─', 58)}┘");
+                writer.WriteLine();
+            }
+        }
+
+        static void SaveIsomorphismClassesFile(ClassificationResult classification)
+        {
+            string filePath = Path.Combine(currentRunDir, "03_Isomorphism_Classes.txt");
+
+            using var writer = new StreamWriter(filePath, false, Encoding.UTF8);
+
+            writer.WriteLine("╔══════════════════════════════════════════════════════════╗");
+            writer.WriteLine("║                 КЛАССЫ ИЗОМОРФИЗМА                       ║");
+            writer.WriteLine("║      (представитель + изоморфные ему таблицы)           ║");
+            writer.WriteLine("╚══════════════════════════════════════════════════════════╝");
+            writer.WriteLine();
+            writer.WriteLine($"Размерность: n = {n}");
+            writer.WriteLine($"Классов изоморфизма: {classification.Classes.Count}");
+            writer.WriteLine();
+
+            foreach (var cls in classification.Classes)
+            {
+                writer.WriteLine($"╔{new string('═', 58)}╗");
+                writer.WriteLine($"║ КЛАСС #{cls.Id}: {cls.GroupType,-40} ║");
+                writer.WriteLine($"╚{new string('═', 58)}╝");
+                writer.WriteLine($"Групп в классе: {cls.Groups.Count}");
+                writer.WriteLine();
+
+                writer.WriteLine($"ПРЕДСТАВИТЕЛЬ КЛАССА (Группа #{cls.Representative.Id}):");
+                writer.WriteLine(new string('─', 60));
+                writer.WriteLine(FormatTableForFile(cls.Representative.Table));
+                writer.WriteLine();
+
+                writer.WriteLine($"Свойства: Нейтр.эл.={cls.Representative.Identity}, " +
+                               $"Абелева={(cls.Representative.IsAbelian ? "Да" : "Нет")}, " +
+                               $"Циклич.={(cls.Representative.IsCyclic ? "Да" : "Нет")}");
+                writer.WriteLine($"Порядки элементов: {string.Join(" ", cls.Representative.ElementOrders.Select((o, i) => $"{i}:{o}"))}");
+                writer.WriteLine();
+
+                if (cls.Groups.Count > 1)
+                {
+                    writer.WriteLine($"ИЗОМОРФНЫЕ ГРУППЫ ({cls.Groups.Count - 1} шт.):");
+                    writer.WriteLine(new string('═', 60));
+
+                    foreach (var group in cls.Groups)
+                    {
+                        if (group.Id == cls.Representative.Id) continue;
+
+                        writer.WriteLine();
+                        writer.WriteLine($"Группа #{group.Id}:");
+                        writer.WriteLine(new string('-', 30));
+                        writer.WriteLine(FormatTableForFile(group.Table));
+
+                        var isomorphism = cls.Isomorphisms
+                            .FirstOrDefault(iso =>
+                                (iso.FromGroup.Id == cls.Representative.Id && iso.ToGroup.Id == group.Id) ||
+                                (iso.FromGroup.Id == group.Id && iso.ToGroup.Id == cls.Representative.Id));
+
+                        if (isomorphism != null)
+                        {
+                            writer.WriteLine($"ИЗОМОРФИЗМ к представителю:");
+                            writer.WriteLine($"  f: {string.Join(" ", isomorphism.Permutation.Select((p, i) => $"{i}→{p}"))}");
+                            writer.WriteLine($"  f⁻¹: {string.Join(" ", isomorphism.InversePermutation.Select((p, i) => $"{i}→{p}"))}");
+                        }
+
+                        writer.WriteLine($"Порядки элементов: {string.Join(" ", group.ElementOrders.Select((o, i) => $"{i}:{o}"))}");
+                        writer.WriteLine();
+                    }
+                }
+                else
+                {
+                    writer.WriteLine("В классе только одна группа (представитель).");
+                    writer.WriteLine();
+                }
+
+                writer.WriteLine(new string('=', 60));
+                writer.WriteLine();
+            }
+        }
+
+        static void SaveDetailedIsomorphismsFile(ClassificationResult classification)
+        {
+            string filePath = Path.Combine(currentRunDir, "04_Detailed_Isomorphisms.txt");
+
+            using var writer = new StreamWriter(filePath, false, Encoding.UTF8);
+
+            writer.WriteLine("╔══════════════════════════════════════════════════════════╗");
+            writer.WriteLine("║           ДЕТАЛЬНЫЕ ИЗОМОРФИЗМЫ МЕЖДУ ГРУППАМИ          ║");
+            writer.WriteLine("║   (биекция + проверка сохранения операции)              ║");
+            writer.WriteLine("╚══════════════════════════════════════════════════════════╝");
+            writer.WriteLine();
+            writer.WriteLine($"Размерность: n = {n}");
+            writer.WriteLine();
+
+            foreach (var cls in classification.Classes.Where(c => c.Groups.Count > 1))
+            {
+                writer.WriteLine($"════════════════════════════════════════════════════════");
+                writer.WriteLine($"КЛАСС #{cls.Id}: {cls.GroupType} ({cls.Groups.Count} групп)");
+                writer.WriteLine($"════════════════════════════════════════════════════════");
+                writer.WriteLine();
+
+                for (int i = 0; i < cls.Groups.Count; i++)
+                {
+                    for (int j = i + 1; j < cls.Groups.Count; j++)
+                    {
+                        var iso = cls.Isomorphisms
+                            .FirstOrDefault(iso =>
+                                (iso.FromGroup.Id == cls.Groups[i].Id && iso.ToGroup.Id == cls.Groups[j].Id) ||
+                                (iso.FromGroup.Id == cls.Groups[j].Id && iso.ToGroup.Id == cls.Groups[i].Id));
+
+                        if (iso != null)
+                        {
+                            writer.WriteLine($"ИЗОМОРФИЗМ: Группа #{iso.FromGroup.Id} → Группа #{iso.ToGroup.Id}");
+                            writer.WriteLine(new string('-', 60));
+
+                            writer.WriteLine("БИЕКЦИЯ ЭЛЕМЕНТОВ:");
+                            writer.WriteLine($"  f: A → B, где A = {{{string.Join(", ", Enumerable.Range(0, n))}}}, B = {{{string.Join(", ", Enumerable.Range(0, n))}}}");
+                            writer.WriteLine($"  f(a) = b, где:");
+
+                            for (int k = 0; k < n; k++)
+                            {
+                                writer.WriteLine($"    {k} → {iso.Permutation[k]}");
+                            }
+                            writer.WriteLine();
+
+                            writer.WriteLine("ОБРАТНАЯ БИЕКЦИЯ:");
+                            writer.WriteLine($"  f⁻¹: B → A, где:");
+                            for (int k = 0; k < n; k++)
+                            {
+                                writer.WriteLine($"    {k} → {iso.InversePermutation[k]}");
+                            }
+                            writer.WriteLine();
+
+                            writer.WriteLine("ПРОВЕРКА СОХРАНЕНИЯ ОПЕРАЦИИ:");
+                            writer.WriteLine($"  Условие: ∀a,b ∈ A: f(a * b) = f(a) * f(b)");
+                            writer.WriteLine();
+
+                            // Подробная проверка для нескольких пар
+                            writer.WriteLine("  Примеры проверки:");
+                            for (int a = 0; a < n; a++)
+                            {
+                                for (int b = 0; b < n; b++)
+                                {
+                                    int ab_A = iso.FromGroup.Table[a, b];
+                                    int f_ab = iso.Permutation[ab_A];
+                                    int f_a_f_b = iso.ToGroup.Table[iso.Permutation[a], iso.Permutation[b]];
+
+                                    writer.WriteLine($"    a={a}, b={b}:");
+                                    writer.WriteLine($"      В группе A: {a} * {b} = {ab_A}");
+                                    writer.WriteLine($"      f({ab_A}) = {f_ab}");
+                                    writer.WriteLine($"      f({a}) * f({b}) = {iso.Permutation[a]} * {iso.Permutation[b]} = {f_a_f_b}");
+                                    writer.WriteLine($"      f({a}*{b}) = f({a})*f({b}): {(f_ab == f_a_f_b ? "✓" : "✗")}");
+                                    writer.WriteLine();
+                                }
+                            }
+
+                            writer.WriteLine("  Порядки элементов:");
+                            writer.WriteLine($"    Группа #{iso.FromGroup.Id}: {string.Join(" ", iso.FromGroup.ElementOrders.Select((o, idx) => $"{idx}:{o}"))}");
+                            writer.WriteLine($"    Группа #{iso.ToGroup.Id}: {string.Join(" ", iso.ToGroup.ElementOrders.Select((o, idx) => $"{idx}:{o}"))}");
+                            writer.WriteLine();
+
+                            writer.WriteLine(new string('=', 60));
+                            writer.WriteLine();
+                        }
+                    }
+                }
+            }
+        }
+
+        static void SaveNonIsomorphismsFile(ClassificationResult classification)
+        {
+            string filePath = Path.Combine(currentRunDir, "05_Non_Isomorphisms.txt");
+
+            using var writer = new StreamWriter(filePath, false, Encoding.UTF8);
+
+            writer.WriteLine("╔══════════════════════════════════════════════════════════╗");
+            writer.WriteLine("║               НЕИЗОМОРФНЫЕ ГРУППЫ                       ║");
+            writer.WriteLine("║      (причины неизоморфности + контрпримеры)            ║");
+            writer.WriteLine("╚══════════════════════════════════════════════════════════╝");
+            writer.WriteLine();
+            writer.WriteLine($"Размерность: n = {n}");
+            writer.WriteLine();
+
+            for (int i = 0; i < classification.Classes.Count; i++)
+            {
+                for (int j = i + 1; j < classification.Classes.Count; j++)
+                {
+                    var cls1 = classification.Classes[i];
+                    var cls2 = classification.Classes[j];
+
+                    writer.WriteLine($"НЕИЗОМОРФНЫЕ КЛАССЫ: #{cls1.Id} ({cls1.GroupType}) и #{cls2.Id} ({cls2.GroupType})");
+                    writer.WriteLine(new string('═', 60));
+
+                    // Сравниваем представителей
+                    var g1 = cls1.Representative;
+                    var g2 = cls2.Representative;
+
+                    writer.WriteLine($"Группа #{g1.Id} (класс #{cls1.Id}):");
+                    writer.WriteLine($"  Тип: {g1.GroupType}");
+                    writer.WriteLine($"  Нейтральный элемент: {g1.Identity}");
+                    writer.WriteLine($"  Абелева: {(g1.IsAbelian ? "Да" : "Нет")}");
+                    writer.WriteLine($"  Циклическая: {(g1.IsCyclic ? "Да" : "Нет")}");
+                    writer.WriteLine($"  Порядки элементов: {string.Join(", ", g1.ElementOrders.Select((o, idx) => $"{idx}:{o}"))}");
+                    writer.WriteLine();
+
+                    writer.WriteLine($"Группа #{g2.Id} (класс #{cls2.Id}):");
+                    writer.WriteLine($"  Тип: {g2.GroupType}");
+                    writer.WriteLine($"  Нейтральный элемент: {g2.Identity}");
+                    writer.WriteLine($"  Абелева: {(g2.IsAbelian ? "Да" : "Нет")}");
+                    writer.WriteLine($"  Циклическая: {(g2.IsCyclic ? "Да" : "Нет")}");
+                    writer.WriteLine($"  Порядки элементов: {string.Join(", ", g2.ElementOrders.Select((o, idx) => $"{idx}:{o}"))}");
+                    writer.WriteLine();
+
+                    // Ищем причину неизоморфности
+                    if (FindNonIsomorphismReason(g1, g2, out var info))
+                    {
+                        writer.WriteLine($"ПРИЧИНА НЕИЗОМОРФНОСТИ: {info.Reason}");
+                        writer.WriteLine();
+                        writer.WriteLine($"Детали: {info.Details}");
+                        writer.WriteLine();
+
+                        if (!string.IsNullOrEmpty(info.Counterexample))
+                        {
+                            writer.WriteLine($"КОНТРПРИМЕР ДЛЯ БИЕКЦИИ:");
+                            writer.WriteLine(info.Counterexample);
+                        }
+
+                        // Показываем, какое условие изоморфизма нарушено
+                        writer.WriteLine();
+                        writer.WriteLine("НАРУШЕНИЕ УСЛОВИЯ ИЗОМОРФИЗМА:");
+                        writer.WriteLine("  Для изоморфизма f: G → H должны выполняться:");
+                        writer.WriteLine("  1. f - биекция (взаимно однозначное отображение)");
+                        writer.WriteLine("  2. f(a * b) = f(a) * f(b) для всех a,b ∈ G");
+                        writer.WriteLine();
+
+                        if (info.Reason.Contains("порядки"))
+                        {
+                            writer.WriteLine("  Нарушено: биекция не сохраняет порядки элементов");
+                            writer.WriteLine("  Если f(a) = b, то порядок(a) должен равняться порядку(b)");
+                        }
+                        else if (info.Reason.Contains("коммутативность"))
+                        {
+                            writer.WriteLine("  Нарушено: изоморфизм сохраняет коммутативность");
+                            writer.WriteLine("  Абелева группа не может быть изоморфна неабелевой");
+                        }
+                    }
+
+                    writer.WriteLine(new string('=', 60));
+                    writer.WriteLine();
+                }
+            }
+        }
+
+        static void SaveStatisticsFile(
+            DimensionStats dimStats,
+            ClassificationResult classification,
+            int totalGroups,
+            int totalNonGroups)
+        {
+            string filePath = Path.Combine(currentRunDir, "06_Statistics.txt");
+
+            using var writer = new StreamWriter(filePath, false, Encoding.UTF8);
+
+            writer.WriteLine("╔══════════════════════════════════════════════════════════╗");
+            writer.WriteLine("║                    СТАТИСТИКА ВЫПОЛНЕНИЯ                 ║");
+            writer.WriteLine("╚══════════════════════════════════════════════════════════╝");
+            writer.WriteLine();
+            writer.WriteLine($"Размерность: n = {n}");
+            writer.WriteLine($"Время обработки: {dimensionTimer.Elapsed.TotalSeconds:F2} сек");
+            writer.WriteLine();
+
+            writer.WriteLine("ОСНОВНЫЕ ЦИФРЫ:");
+            writer.WriteLine(new string('─', 60));
+            writer.WriteLine($"Всего таблиц построено:           {totalGroups + totalNonGroups:N0}");
+            writer.WriteLine($"Таблиц, не являющихся группами:   {totalNonGroups:N0}");
+            writer.WriteLine($"Найдено групп:                    {totalGroups:N0}");
+            writer.WriteLine($"Классов изоморфизма:              {classification.Classes.Count:N0}");
+            writer.WriteLine();
+
+            writer.WriteLine("КЛАССЫ ИЗОМОРФИЗМА:");
+            writer.WriteLine(new string('─', 60));
+
+            foreach (var cls in classification.Classes)
+            {
+                writer.WriteLine($"Класс #{cls.Id}: {cls.GroupType}");
+                writer.WriteLine($"  • Количество групп: {cls.Groups.Count}");
+                writer.WriteLine($"  • Нейтральный элемент: {cls.Representative.Identity}");
+                writer.WriteLine($"  • Абелева: {(cls.Representative.IsAbelian ? "Да" : "Нет")}");
+                writer.WriteLine($"  • Циклическая: {(cls.Representative.IsCyclic ? "Да" : "Нет")}");
+                writer.WriteLine($"  • Порядки элементов: {string.Join(", ", cls.Representative.ElementOrders)}");
+                writer.WriteLine();
+            }
+        }
+
+        static void SaveFullReportFile(
+            List<NonGroupData> nonGroups,
+            List<GroupData> groups,
+            ClassificationResult classification,
+            DimensionStats dimStats)
+        {
+            string filePath = Path.Combine(currentRunDir, "07_Full_Report.txt");
+
+            using var writer = new StreamWriter(filePath, false, Encoding.UTF8);
+
+            writer.WriteLine("╔══════════════════════════════════════════════════════════╗");
+            writer.WriteLine("║                 ПОЛНЫЙ ОТЧЕТ ПО АНАЛИЗУ                  ║");
+            writer.WriteLine("║                 ТАБЛИЦ КЭЛИ ДЛЯ n = " + n + "                     ║");
+            writer.WriteLine("╚══════════════════════════════════════════════════════════╝");
+            writer.WriteLine();
+            writer.WriteLine($"Дата создания: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            writer.WriteLine();
+
+            writer.WriteLine("1. СТАТИСТИКА");
+            writer.WriteLine(new string('=', 60));
+            writer.WriteLine($"Всего таблиц построено:      {groups.Count + nonGroups.Count:N0}");
+            writer.WriteLine($"Не являются группами:        {nonGroups.Count:N0}");
+            writer.WriteLine($"Являются группами:           {groups.Count:N0}");
+            writer.WriteLine($"Классов изоморфизма:         {classification.Classes.Count:N0}");
+            writer.WriteLine($"Время обработки:             {dimensionTimer.Elapsed.TotalSeconds:F2} сек");
+            writer.WriteLine();
+
+            writer.WriteLine("2. ВСЕ НАЙДЕННЫЕ ГРУППЫ");
+            writer.WriteLine(new string('=', 60));
+            writer.WriteLine();
+
+            foreach (var cls in classification.Classes)
+            {
+                writer.WriteLine($"Класс #{cls.Id} ({cls.GroupType}): {cls.Groups.Count} групп");
+                writer.WriteLine($"  Группы: {string.Join(", ", cls.Groups.Select(g => $"#{g.Id}"))}");
+            }
+            writer.WriteLine();
+
+            writer.WriteLine("3. ИЗОМОРФИЗМЫ МЕЖДУ ГРУППАМИ");
+            writer.WriteLine(new string('=', 60));
+            writer.WriteLine();
+
+            foreach (var cls in classification.Classes.Where(c => c.Groups.Count > 1))
+            {
+                writer.WriteLine($"Класс #{cls.Id} ({cls.GroupType}):");
+                foreach (var iso in cls.Isomorphisms.Take(2)) // Ограничим вывод
+                {
+                    writer.WriteLine($"  Группа #{iso.FromGroup.Id} → Группа #{iso.ToGroup.Id}");
+                    writer.WriteLine($"    Биекция: {string.Join(" ", iso.Permutation.Select((p, i) => $"{i}→{p}"))}");
+                }
+                writer.WriteLine();
+            }
+
+            writer.WriteLine("4. ТАБЛИЦЫ, НЕ ЯВЛЯЮЩИЕСЯ ГРУППАМИ");
+            writer.WriteLine(new string('=', 60));
+            writer.WriteLine();
+
+            if (nonGroups.Count == 0)
+            {
+                writer.WriteLine("Все таблицы являются группами.");
+            }
+            else
+            {
+                writer.WriteLine($"Найдено {nonGroups.Count} таблиц, не являющихся группами.");
+                writer.WriteLine("Примеры (первые 5):");
+                writer.WriteLine();
+
+                foreach (var ng in nonGroups.Take(5))
+                {
+                    writer.WriteLine($"Таблица #{ng.Id}: {ng.FailedReason}");
+                    writer.WriteLine($"  {ng.FailedExample}");
+                    writer.WriteLine();
+                }
+            }
+        }
+
+        static string FormatTableForFile(int[,] table)
+        {
+            var sb = new StringBuilder();
+
+            sb.Append("│ ");
+            sb.Append("    ");
+            for (int j = 0; j < n; j++) sb.Append($"{j,3}");
+            sb.Append(new string(' ', 58 - (4 + n * 3) - 2)).Append("│").AppendLine();
+
+            sb.Append("│ ");
+            sb.Append("   ┌");
+            sb.Append(new string('─', n * 3));
+            sb.Append(new string(' ', 58 - (3 + n * 3) - 2)).Append("│").AppendLine();
+
+            for (int i = 0; i < n; i++)
+            {
+                sb.Append("│ ");
+                sb.Append($"{i,3} │");
+                for (int j = 0; j < n; j++)
+                {
+                    sb.Append($"{table[i, j],3}");
+                }
+                sb.Append(new string(' ', 58 - (6 + n * 3) - 2)).Append("│").AppendLine();
+            }
+
+            return sb.ToString();
+        }
+
+        static IEnumerable<int[]> GetPermutations(int[] array)
+        {
+            if (array.Length == 1)
+            {
+                yield return (int[])array.Clone();
+                yield break;
+            }
+
+            for (int i = 0; i < array.Length; i++)
+            {
+                int[] rest = new int[array.Length - 1];
+                Array.Copy(array, 0, rest, 0, i);
+                Array.Copy(array, i + 1, rest, i, array.Length - i - 1);
+
+                foreach (var perm in GetPermutations(rest))
+                {
+                    int[] result = new int[array.Length];
+                    result[0] = array[i];
+                    Array.Copy(perm, 0, result, 1, perm.Length);
+                    yield return result;
+                }
+            }
+        }
+
+        static void LogError(int dimension, Exception ex)
+        {
+            string errorFile = Path.Combine(currentRunDir, $"ERROR_n{dimension}.txt");
+            File.WriteAllText(errorFile,
+                $"Ошибка при обработке n={dimension}\n" +
+                $"Время: {DateTime.Now:HH:mm:ss}\n" +
+                $"Ошибка: {ex.Message}\n\n" +
+                $"StackTrace:\n{ex.StackTrace}");
+        }
+
+        // ==================== КЛАССЫ ДЛЯ ХРАНЕНИЯ ДАННЫХ ====================
+
+        class GroupData
+        {
+            public int Id { get; set; }
+            public int[,] Table { get; set; }
+            public int Identity { get; set; }
+            public bool IsAbelian { get; set; }
+            public bool IsCyclic { get; set; }
+            public string GroupType { get; set; }
+            public int[] ElementOrders { get; set; }
+            public int[] Inverses { get; set; }
+        }
+
+        class NonGroupData
+        {
+            public int Id { get; set; }
+            public int[,] Table { get; set; }
+            public string FailedReason { get; set; }
+            public string FailedDetails { get; set; }
+            public string FailedAxiom { get; set; }
+            public string FailedExample { get; set; }
+            public bool HasIdentity { get; set; }
+            public int? IdentityElement { get; set; }
+            public int[] ElementOrders { get; set; }
+        }
+
+        class GroupIsomorphism
+        {
+            public GroupData FromGroup { get; set; }
+            public GroupData ToGroup { get; set; }
+            public int[] Permutation { get; set; }
+            public int[] InversePermutation { get; set; }
+            public string VerificationDetails { get; set; }
+            public List<string> FailedPairs { get; set; }
+        }
+
+        class NonIsomorphismInfo
+        {
+            public string Reason { get; set; }
+            public string Details { get; set; }
+            public string Counterexample { get; set; }
+        }
+
+        class IsomorphismClass
+        {
+            public int Id { get; set; }
+            public string GroupType { get; set; }
+            public GroupData Representative { get; set; }
+            public List<GroupData> Groups { get; set; }
+            public List<GroupIsomorphism> Isomorphisms { get; set; } = new List<GroupIsomorphism>();
+        }
+
+        class ClassificationResult
+        {
+            public List<IsomorphismClass> Classes { get; set; } = new List<IsomorphismClass>();
+        }
+
+        class GroupCheckResult
+        {
+            public bool IsGroup { get; set; }
+            public int? Identity { get; set; }
+            public int[] ElementOrders { get; set; }
+            public int[] Inverses { get; set; }
+            public bool IsAbelian { get; set; }
+            public bool IsCyclic { get; set; }
+            public string FailedReason { get; set; }
+            public string FailedDetails { get; set; }
+            public string FailedAxiom { get; set; }
+            public string FailedExample { get; set; }
+            public bool HasIdentity { get; set; }
+
+            public static GroupCheckResult NotGroup(
+                string reason, string details, string axiom, string example,
+                bool hasIdentity, int? identity, int[] orders) =>
+                new GroupCheckResult
+                {
+                    IsGroup = false,
+                    FailedReason = reason,
+                    FailedDetails = details,
+                    FailedAxiom = axiom,
+                    FailedExample = example,
+                    HasIdentity = hasIdentity,
+                    Identity = identity,
+                    ElementOrders = orders
+                };
+
+            public static GroupCheckResult Group(
+                int identity, int[] orders, int[] inverses,
+                bool isAbelian, bool isCyclic) =>
+                new GroupCheckResult
+                {
+                    IsGroup = true,
+                    Identity = identity,
+                    ElementOrders = orders,
+                    Inverses = inverses,
+                    IsAbelian = isAbelian,
+                    IsCyclic = isCyclic
+                };
+        }
+
+        class DimensionStats
+        {
+            public int Dimension { get; set; }
+            public long TotalTables { get; set; }
+            public long TotalGroups { get; set; }
+            public long NonGroups { get; set; }
+            public long IsomorphismClasses { get; set; }
+        }
+    }
+}

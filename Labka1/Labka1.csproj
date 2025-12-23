@@ -1,0 +1,23 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PublishAot>false</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AssemblyName>CayleyTableAnalyzer</AssemblyName>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- Включаем поддержку UTF-8 для CSV -->
+    <CodePage>65001</CodePage>
+    <OutputEncoding>UTF-8</OutputEncoding>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+    <Optimize>true</Optimize>
+    <DebugType>embedded</DebugType>
+    <DebugSymbols>true</DebugSymbols>
+  </PropertyGroup>
+</Project>
