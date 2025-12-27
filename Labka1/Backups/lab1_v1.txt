@@ -370,39 +370,8 @@ namespace CayleyTablesFinal
             // 6. Проверка цикличности
             bool isCyclic = IsCyclicGroup(table, identity.Value);
 
-            //DebugCalculateElementOrders(table, identity.Value);
-
             return GroupCheckResult.Group(
                 identity.Value, elementOrders3, inverses, isAbelian, isCyclic);
-        }
-
-        static void DebugCalculateElementOrders(int[,] table, int identity)
-        {
-            Console.WriteLine("\n=== ДЕБАГ: Порядки элементов ===");
-            Console.WriteLine($"Нейтральный элемент: {identity}");
-            Console.WriteLine("Таблица:");
-            for (int i = 0; i < n; i++)
-            {
-                Console.Write($"Строка {i}: ");
-                for (int j = 0; j < n; j++)
-                    Console.Write($"{table[i, j]} ");
-                Console.WriteLine();
-            }
-
-            Console.WriteLine("\nРасчет порядков:");
-            for (int a = 0; a < n; a++)
-            {
-                Console.Write($"Элемент {a}: ");
-                int order = 1;
-                int current = a;
-                while (current != identity && order <= n * 2)
-                {
-                    Console.Write($"{current} ");
-                    current = table[a, current];
-                    order++;
-                }
-                Console.WriteLine($"-> порядок: {(current == identity ? order : -1)}");
-            }
         }
 
         static ClassificationResult ClassifyGroupsCorrectly(List<GroupData> groups)
@@ -487,35 +456,8 @@ namespace CayleyTablesFinal
         {
             isomorphism = null;
 
-            // 1. Быстрая проверка: одинаковые ли порядки элементов по гистограмме?
-            var hist1 = g1.ElementOrders.GroupBy(o => o).ToDictionary(g => g.Key, g => g.Count());
-            var hist2 = g2.ElementOrders.GroupBy(o => o).ToDictionary(g => g.Key, g => g.Count());
-            if (!hist1.OrderBy(kv => kv.Key).SequenceEqual(hist2.OrderBy(kv => kv.Key)))
-                return false;
-
-            if (n <= 5)
-                Console.WriteLine($"\n=== ДЕБАГ ИЗОМОРФИЗМ: Группа #{g1.Id} → Группа #{g2.Id} ===");
-
             // Быстрые проверки
-            if (g1.GroupType != g2.GroupType)
-            {
-                if (n <= 5)
-                    Console.WriteLine($"Разные типы: {g1.GroupType} != {g2.GroupType}");
-                return false;
-            }
-
-            // Проверка распределения порядков
-            var orders1 = g1.ElementOrders.OrderBy(x => x).ToArray();
-            var orders2 = g2.ElementOrders.OrderBy(x => x).ToArray();
-            if (!orders1.SequenceEqual(orders2))
-            {
-                if (n <= 5)
-                    Console.WriteLine($"Разные порядки: [{string.Join(",", orders1)}] != [{string.Join(",", orders2)}]");
-                return false;
-            }
-
-            //// Быстрые проверки
-            //if (g1.GroupType != g2.GroupType) return false;
+            if (g1.GroupType != g2.GroupType) return false;
 
             // Перебираем все биекции
             var permutations = GetPermutations(Enumerable.Range(0, n).ToArray());
@@ -547,7 +489,6 @@ namespace CayleyTablesFinal
 
                 if (isIsomorphism)
                 {
-                    if (n <= 5) Console.WriteLine($"Найден изоморфизм: перестановка {string.Join(" ", perm)}");
                     int[] inverse = new int[n];
                     for (int i = 0; i < n; i++) inverse[perm[i]] = i;
 
@@ -581,8 +522,7 @@ namespace CayleyTablesFinal
                     return true;
                 }
             }
-            if (n <= 5) Console.WriteLine("Изоморфизм не найден");
-            Console.WriteLine("Изоморфизм не найден");
+
             return false;
         }
 
