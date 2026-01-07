@@ -1,4 +1,5 @@
-﻿using System.Diagnostics;
+﻿using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text;
 
 namespace CayleyTablesFinal
@@ -12,9 +13,8 @@ namespace CayleyTablesFinal
         static Stopwatch dimensionTimer = new Stopwatch();
 
         static Dictionary<int, DimensionStats> stats = new Dictionary<int, DimensionStats>();
-        static int nextTableId = 1;
-        static int nextGroupId = 1;
-        static object idLock = new object();
+
+        // 1. ОСНОВНЫЕ МЕТОДЫ ПРОГРАММЫ
 
         static void Main(string[] args)
         {
@@ -102,36 +102,243 @@ namespace CayleyTablesFinal
             var dimStats = new DimensionStats { Dimension = dimension };
             stats[dimension] = dimStats;
 
-            Console.WriteLine($"Этап 1/4: Генерация латинских квадратов...");
-            var latinSquares = GenerateLatinSquaresWithFixedFirstRowCol();
-            dimStats.TotalTables = latinSquares.Count;
-            Console.WriteLine($"   Сгенерировано таблиц: {latinSquares.Count:N0}");
+            // Запрашиваем у пользователя лимит сохранения
+            int saveLimit = GetNonGroupSaveLimit(dimension);
 
-            Console.WriteLine($"Этап 2/4: Проверка на свойства группы...");
-            var (groups, nonGroups) = CheckAllTablesOptimized(latinSquares); // Используем оптимизированную версию
+            string nonGroupsFilePath = Path.Combine(currentRunDir, "01_Non_Groups.txt");
+
+            Console.WriteLine();
+            Console.WriteLine($"Этап 1/4: Потоковая генерация и проверка...");
+            Console.WriteLine($"   Сохранение не-групп: {(saveLimit == -1 ? "выключено" : saveLimit == 0 ? "все" : $"первые {saveLimit}")}");
+
+            var (groups, totalNonGroups, totalSquares) =
+                GenerateAndCheckStreaming(dimension, nonGroupsFilePath, saveLimit);
+
+            dimStats.TotalTables = totalSquares;
             dimStats.TotalGroups = groups.Count;
-            dimStats.NonGroups = nonGroups.Count;
-            Console.WriteLine($"   Групп: {groups.Count}, Не групп: {nonGroups.Count}");
+            dimStats.NonGroups = totalNonGroups;
+
+            Console.WriteLine($"   Сгенерировано таблиц: {dimStats.TotalTables:N0}");
+            Console.WriteLine($"   Групп: {groups.Count}, Не групп: {dimStats.NonGroups:N0}");
+
+            if (saveLimit != -1)
+            {
+                long actuallySaved = saveLimit == 0 ? totalNonGroups : Math.Min(saveLimit, totalNonGroups);
+                Console.WriteLine($"   Сохранено не групп: {actuallySaved:N0} (в файл 01_Non_Groups.txt)");
+            }
+
+            Console.WriteLine($"Этап 2/4: Назначение ID группам...");
+            // Назначаем ID группам (теперь это делаем после генерации)
+            for (int i = 0; i < groups.Count; i++)
+            {
+                groups[i].Id = i + 1;
+            }
 
             Console.WriteLine($"Этап 3/4: Классификация изоморфизма...");
             var classification = ClassifyGroupsCorrectly(groups);
             dimStats.IsomorphismClasses = classification.Classes.Count;
             Console.WriteLine($"   Классов изоморфизма: {classification.Classes.Count}");
 
-            Console.WriteLine($"Этап 4/4: Сохранение результатов...");
-            SaveAllResultsWithDetailedIsomorphisms(nonGroups, groups, classification, dimStats);
+            Console.WriteLine($"Этап 4/4: Сохранение результатов групп...");
+            SaveAllResultsForGroups(groups, classification, dimStats);
 
             Console.WriteLine($"✓ Для n={dimension}: {groups.Count} групп → {classification.Classes.Count} классов");
         }
 
-        static List<TableData> GenerateLatinSquaresWithFixedFirstRowCol()
+        static int GetNonGroupSaveLimit(int dimension)
         {
-            var squares = new List<TableData>();
+            Console.WriteLine();
+            Console.WriteLine("╔══════════════════════════════════════════════════════════╗");
+            Console.WriteLine("║          НАСТРОЙКА СОХРАНЕНИЯ НЕ-ГРУПП                  ║");
+            Console.WriteLine("╚══════════════════════════════════════════════════════════╝");
 
+            // Предупреждение для больших размерностей
+            if (dimension == 7)
+            {
+                Console.WriteLine($"⚠  ПРЕДУПРЕЖДЕНИЕ: Для n={dimension} количество не-групп может быть очень большим!");
+                Console.WriteLine($"   Ожидаемое количество: ~16.9 миллионов таблиц");
+                Console.WriteLine($"   Примерный размер файла: ~8-10 ГБ");
+                Console.WriteLine();
+            }
+            else if (dimension == 8)
+            {
+                Console.WriteLine($"⚠  КРИТИЧЕСКОЕ ПРЕДУПРЕЖДЕНИЕ: Для n={dimension} количество не-групп ОГРОМНО!");
+                Console.WriteLine($"   Ожидаемое количество: ~535 миллиардов таблиц");
+                Console.WriteLine($"   Примерный размер файла: ~250 ТБ (при сохранении всех)");
+                Console.WriteLine($"   Время расчета: ~12.5 дней (при 500K/сек)");
+                Console.WriteLine();
+            }
+            else if (dimension >= 9)
+            {
+                Console.WriteLine($"⚠  НЕРЕАЛЬНО: Для n={dimension} полный перебор невозможен!");
+                Console.WriteLine($"   Ожидаемое количество: астрономическое");
+                Console.WriteLine($"   Рекомендуется использовать saveLimit=50 или -1");
+                Console.WriteLine();
+            }
+
+            Console.WriteLine("Сколько не-групп сохранить в файл?");
+            Console.WriteLine("  0 - Сохранить все (полный вывод, большой файл)");
+            Console.WriteLine("  N - Сохранить только первые N таблиц (рекомендуется: 50-1000)");
+            Console.WriteLine("  -1 - Не сохранять не-группы (только статистика)");
+            Console.Write("> ");
+
+            if (int.TryParse(Console.ReadLine(), out int limit))
+            {
+                if (limit == 0 && dimension >= 7)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine("⚠  ВНИМАНИЕ: Вы выбрали сохранение ВСЕХ не-групп.");
+                    Console.WriteLine("   Файл может занять более 10 ГБ дискового пространства!");
+                    Console.Write("   Подтвердите (y/n): ");
+
+                    if (Console.ReadLine().ToLower() != "y")
+                    {
+                        return GetNonGroupSaveLimit(dimension); // Рекурсивный вызов
+                    }
+                }
+                return limit;
+            }
+
+            return 50; // Значение по умолчанию
+        }
+
+        // 2. ГЕНЕРАЦИЯ ЛАТИНСКИХ КВАДРАТОВ
+
+        // МЕТОД ДЛЯ ПОТОКОВОЙ ГЕНЕРАЦИИ И ПРОВЕРКИ
+        static (List<GroupData> groups, long totalNonGroups, long totalSquares)
+            GenerateAndCheckStreaming(int dimension, string nonGroupsFilePath, int saveLimit)
+        {
+            var groups = new ConcurrentBag<GroupData>();
+            long nonGroupCount = 0;
+            long totalSquares = 0;
+            long savedNonGroupCount = 0;
+
+            AsyncFileWriter fileWriter = null;
+
+            // Создаем писатель только если нужно сохранять
+            if (saveLimit != -1)
+            {
+                fileWriter = new AsyncFileWriter(nonGroupsFilePath);
+            }
+
+            // Генерация всех вторых строк (основа для параллелизма)
+            Console.WriteLine("   Генерация вторых строк...");
+            var secondRows = GenerateAllSecondRows(dimension);
+            Console.WriteLine($"   Найдено вторых строк: {secondRows.Count:N0}");
+
+            // Оценка общего количества квадратов
+            long estimatedTotal = EstimateTotalLatinSquares(dimension, secondRows.Count);
+            var progress = new ProgressTracker(estimatedTotal, "Генерация квадратов");
+
+            // Параллельная обработка каждой второй строки
+            Parallel.ForEach(secondRows, new ParallelOptions
+            {
+                MaxDegreeOfParallelism = Environment.ProcessorCount
+            }, secondRow =>
+            {
+                // Генерация квадратов для данной второй строки
+                GenerateFromSecondRow(dimension, secondRow, groups,
+                    ref nonGroupCount, ref savedNonGroupCount,
+                    fileWriter, saveLimit, ref totalSquares, progress);
+            });
+
+            progress.Complete();
+
+            // Завершаем асинхронную запись
+            if (fileWriter != null)
+            {
+                Console.Write("   Завершение записи на диск...");
+                fileWriter.Dispose();
+                Console.WriteLine(" ✓");
+            }
+
+            return (groups.ToList(), nonGroupCount, totalSquares);
+        }
+
+        // МЕТОД ДЛЯ ГЕНЕРАЦИИ ВСЕХ ВТОРЫХ СТРОК (БЕСПОРЯДКОВ)
+        static List<int[]> GenerateAllSecondRows(int n)
+        {
+            var rows = new List<int[]>();
+            int[] current = new int[n];
+            bool[] used = new bool[n];
+
+            // Вторая строка должна быть беспорядком (derangement)
+            // Элемент j не может быть на позиции j
+            GenerateDerangements(0, current, used, rows, n);
+            return rows;
+        }
+
+        static void GenerateDerangements(int col, int[] current, bool[] used,
+            List<int[]> result, int n)
+        {
+            if (col == n)
+            {
+                result.Add((int[])current.Clone());
+                return;
+            }
+
+            for (int val = 0; val < n; val++)
+            {
+                if (val != col && !used[val]) // Беспорядок: val не должен быть равен col
+                {
+                    current[col] = val;
+                    used[val] = true;
+                    GenerateDerangements(col + 1, current, used, result, n);
+                    used[val] = false;
+                }
+            }
+        }
+
+        // ОЦЕНКА ОБЩЕГО КОЛИЧЕСТВА КВАДРАТОВ
+        static long EstimateTotalLatinSquares(int n, int secondRowCount)
+        {
+            // Известные значения для латинских квадратов с фиксированной первой строкой и столбцом
+            var knownValues = new Dictionary<int, long>
+    {
+        {1, 1}, {2, 1}, {3, 1}, {4, 4}, {5, 56}, {6, 9408}, {7, 16942080}, {8, 535281401856}
+    };
+
+            if (knownValues.ContainsKey(n))
+                return knownValues[n];
+
+            // Для n>=9 даем приблизительную оценку (очень грубую, но лучше чем ничего)
+            if (n == 9)
+                return 377_597_570_964_258_816L; // ≈ 3.78×10¹⁷
+
+
+            // Запасная оценка для n>10 (очень грубая)
+            // Формула: L(n) ≈ n!^(n-1) / e^(n²)
+            long estimate = 1;
+            for (int i = 2; i < n; i++)
+            {
+                estimate *= Factorial(i);
+                if (estimate > long.MaxValue / 1000) break; // Чтобы избежать переполнения
+            }
+
+            return estimate > 0 ? estimate : secondRowCount * 1_000_000L;
+        }
+
+        static long Factorial(int x)
+        {
+            long result = 1;
+            for (int i = 2; i <= x; i++) result *= i;
+            return result;
+        }
+
+        // 3. РЕКУРСИВНОЕ ПОСТРОЕНИЕ И ПРОВЕРКА
+
+        // ГЕНЕРАЦИЯ КВАДРАТОВ ИЗ ДАННОЙ ВТОРОЙ СТРОКИ
+        static void GenerateFromSecondRow(int n, int[] secondRow,
+            ConcurrentBag<GroupData> groups,
+            ref long nonGroupCount, ref long savedNonGroupCount,
+            AsyncFileWriter fileWriter, int saveLimit,
+            ref long totalSquares, ProgressTracker progress)
+        {
             int[,] square = new int[n, n];
             bool[,] rowUsed = new bool[n, n];
             bool[,] colUsed = new bool[n, n];
 
+            // Инициализация: первая строка и первый столбец
             for (int j = 0; j < n; j++)
             {
                 square[0, j] = j;
@@ -146,23 +353,43 @@ namespace CayleyTablesFinal
                 colUsed[0, i] = true;
             }
 
-            FillLatinSquareRecursive(square, 1, 1, rowUsed, colUsed, squares);
-            return squares;
+            // Вторая строка
+            for (int j = 0; j < n; j++)
+            {
+                square[1, j] = secondRow[j];
+                rowUsed[1, secondRow[j]] = true;
+                colUsed[j, secondRow[j]] = true;
+            }
+
+            // Рекурсивное заполнение с третьей строки
+            FillRemainingStreaming(square, 2, 1, rowUsed, colUsed,
+                groups, ref nonGroupCount, ref savedNonGroupCount,
+                fileWriter, saveLimit, ref totalSquares, progress, n);
         }
 
-        static void FillLatinSquareRecursive(int[,] square, int row, int col,
-            bool[,] rowUsed, bool[,] colUsed, List<TableData> result)
+        // РЕКУРСИВНОЕ ЗАПОЛНЕНИЕ С ПРОВЕРКОЙ И СОХРАНЕНИЕМ
+        static void FillRemainingStreaming(int[,] square, int row, int col,
+            bool[,] rowUsed, bool[,] colUsed,
+            ConcurrentBag<GroupData> groups,
+            ref long nonGroupCount, ref long savedNonGroupCount,
+            AsyncFileWriter fileWriter, int saveLimit,
+            ref long totalSquares, ProgressTracker progress,
+            int n)
         {
             if (row == n)
             {
-                // Создаем TableData один раз - это единственное клонирование
-                result.Add(new TableData(n, square));
+                // Квадрат сгенерирован - проверяем и сохраняем
+                ProcessCompletedSquareStreaming(square, groups,
+                    ref nonGroupCount, ref savedNonGroupCount,
+                    fileWriter, saveLimit, ref totalSquares, progress, n);
                 return;
             }
 
             if (col == n)
             {
-                FillLatinSquareRecursive(square, row + 1, 1, rowUsed, colUsed, result);
+                FillRemainingStreaming(square, row + 1, 1, rowUsed, colUsed,
+                    groups, ref nonGroupCount, ref savedNonGroupCount,
+                    fileWriter, saveLimit, ref totalSquares, progress, n);
                 return;
             }
 
@@ -174,7 +401,9 @@ namespace CayleyTablesFinal
                     rowUsed[row, val] = true;
                     colUsed[col, val] = true;
 
-                    FillLatinSquareRecursive(square, row, col + 1, rowUsed, colUsed, result);
+                    FillRemainingStreaming(square, row, col + 1, rowUsed, colUsed,
+                        groups, ref nonGroupCount, ref savedNonGroupCount,
+                        fileWriter, saveLimit, ref totalSquares, progress, n);
 
                     rowUsed[row, val] = false;
                     colUsed[col, val] = false;
@@ -182,162 +411,63 @@ namespace CayleyTablesFinal
             }
         }
 
-        // Добавляем новый класс для неизменяемого представления таблицы
-        public class TableData
+        // ОБРАБОТКА ЗАВЕРШЕННОГО КВАДРАТА
+        static void ProcessCompletedSquareStreaming(int[,] square,
+            ConcurrentBag<GroupData> groups,
+            ref long nonGroupCount,
+            ref long savedNonGroupCount,
+            AsyncFileWriter fileWriter,
+            int saveLimit,
+            ref long totalSquares,
+            ProgressTracker progress,
+            int n)
         {
-            private readonly int[] _data;
-            public int N { get; }
+            long currentTotal = Interlocked.Increment(ref totalSquares);
 
-            public TableData(int n, int[,] table)
+            // Обновляем прогресс
+            progress.Increment();
+
+            var table = new CompressedTableData(n, square);
+            var result = CheckGroupPropertiesOptimized(table);
+
+            if (result.IsGroup)
             {
-                N = n;
-                _data = new int[n * n];
+                var group = new GroupData
+                {
+                    Table = table,
+                    Identity = result.Identity!.Value,
+                    IsAbelian = result.IsAbelian,
+                    ElementOrders = result.ElementOrders!,
+                    Inverses = result.Inverses!,
+                    IsCyclic = result.IsCyclic,
+                    GroupType = DetermineGroupTypeFast(result.IsCyclic,
+                        result.IsAbelian, result.ElementOrders!, n)
+                };
 
-                // Копируем данные один раз при создании
-                for (int i = 0; i < n; i++)
-                    for (int j = 0; j < n; j++)
-                        _data[i * n + j] = table[i, j];
+                groups.Add(group);
             }
-
-            public TableData(int n, int[] data)
+            else
             {
-                N = n;
-                _data = (int[])data.Clone(); // Клонируем один раз
-            }
+                long currentNG = Interlocked.Increment(ref nonGroupCount);
 
-            public int this[int i, int j]
-            {
-                get => _data[i * N + j];
-                private set => _data[i * N + j] = value;
-            }
+                // Упрощенная проверка: если saveLimit > 0, проверяем <= saveLimit
+                // если saveLimit == 0, сохраняем все
+                bool shouldSave = fileWriter != null &&
+                                 (saveLimit == 0 || currentNG <= saveLimit);
 
-            // Для отладки и сохранения
-            public int[,] To2DArray()
-            {
-                var result = new int[N, N];
-                for (int i = 0; i < N; i++)
-                    for (int j = 0; j < N; j++)
-                        result[i, j] = _data[i * N + j];
-                return result;
+                if (shouldSave)
+                {
+                    long currentSaved = Interlocked.Increment(ref savedNonGroupCount);
+                    string nonGroupString = FormatNonGroupToString(table, result, currentNG, n);
+                    fileWriter.EnqueueWrite(nonGroupString);
+                }
             }
-
-            // Сравнение для изоморфизма
-            public int[] GetDataCopy() => (int[])_data.Clone();
         }
 
-        static (List<GroupData> groups, List<NonGroupData> nonGroups)
-    CheckAllTablesOptimized(List<TableData> tables)
-        {
-            // Предварительное выделение массивов
-            var groups = new GroupData[tables.Count];
-            var nonGroups = new NonGroupData[tables.Count];
 
-            int groupCount = 0;
-            int nonGroupCount = 0;
+        // 4. ПРОВЕРКА АКСИОМ ГРУППЫ
 
-            // Для троттлингующего CPU используем меньше потоков
-            var parallelOptions = new ParallelOptions
-            {
-                MaxDegreeOfParallelism = Math.Max(2, Environment.ProcessorCount / 2)
-            };
-
-            object lockObj = new object();
-            int processed = 0;
-            int total = tables.Count;
-
-            Parallel.ForEach(tables, parallelOptions, table =>
-            {
-                var result = CheckGroupPropertiesOptimized(table);
-
-                if (result.IsGroup)
-                {
-                    var group = new GroupData
-                    {
-                        // ID будет установлен позже
-                        Table = table, // Ссылка, а не клон!
-                        Identity = result.Identity!.Value,
-                        IsAbelian = result.IsAbelian,
-                        ElementOrders = result.ElementOrders!,
-                        Inverses = result.Inverses!,
-                        IsCyclic = result.IsCyclic,
-                        GroupType = DetermineGroupTypeFast(result.IsCyclic,
-                            result.IsAbelian, result.ElementOrders!, table.N)
-                    };
-
-                    lock (lockObj)
-                    {
-                        group.Id = ++groupCount;
-                        groups[groupCount - 1] = group;
-                    }
-                }
-                else
-                {
-                    var nonGroup = new NonGroupData
-                    {
-                        Table = table, // Ссылка, а не клон!
-                        FailedReason = result.FailedReason!,
-                        FailedExample = result.FailedExample!,
-                        FailedAxiom = result.FailedAxiom,
-                        FailedDetails = result.FailedDetails,
-                        HasIdentity = result.HasIdentity,
-                        IdentityElement = result.Identity,
-                        ElementOrders = result.ElementOrders ?? new int[table.N]
-                    };
-
-                    lock (lockObj)
-                    {
-                        nonGroup.Id = ++nonGroupCount;
-                        nonGroups[nonGroupCount - 1] = nonGroup;
-                    }
-                }
-
-                // Прогресс
-                int current = Interlocked.Increment(ref processed);
-                if (current % Math.Max(1000, total / 100) == 0)
-                {
-                    lock (lockObj)
-                    {
-                        Console.Write($"\r   Проверено: {current:N0}/{total:N0} ({(double)current / total * 100:F1}%)");
-                    }
-                }
-            });
-
-            Console.WriteLine();
-
-            // Обрезаем массивы до реального размера
-            Array.Resize(ref groups, groupCount);
-            Array.Resize(ref nonGroups, nonGroupCount);
-
-            return (groups.ToList(), nonGroups.ToList());
-        }
-
-        static string DetermineGroupTypeFast(bool isCyclic, bool isAbelian, int[] orders, int n)
-        {
-            if (isCyclic) return $"C{n} (Циклическая)";
-
-            if (n == 4 && !isCyclic && isAbelian)
-            {
-                // Подсчитываем элементы порядка 2
-                int countOrder2 = 0;
-                for (int i = 0; i < orders.Length; i++)
-                    if (orders[i] == 2) countOrder2++;
-
-                if (countOrder2 == 3) return "V4 (Группа Клейна)";
-            }
-
-            if (n == 6 && !isAbelian)
-            {
-                int countOrder3 = 0;
-                for (int i = 0; i < orders.Length; i++)
-                    if (orders[i] == 3) countOrder3++;
-
-                if (countOrder3 >= 2) return "S3 (Симметрическая)";
-            }
-
-            return isAbelian ? $"Абелева группа порядка {n}" : $"Неабелева группа порядка {n}";
-        }
-
-        static GroupCheckResult CheckGroupPropertiesOptimized(TableData table)
+        static GroupCheckResult CheckGroupPropertiesOptimized(CompressedTableData table)
         {
             int n = table.N;
 
@@ -371,9 +501,10 @@ namespace CayleyTablesFinal
                     false, null, new int[n]);
             }
 
-            // 2. Проверка обратных элементов (с кэшированием)
+            // 2. Проверка обратных элементов (с кэшированием и конкретным элементом)
             int[] inverses = new int[n];
             bool allHaveInverses = true;
+            int elementWithoutInverse = -1;
 
             for (int a = 0; a < n; a++)
             {
@@ -391,6 +522,7 @@ namespace CayleyTablesFinal
                 if (!foundInverse)
                 {
                     allHaveInverses = false;
+                    elementWithoutInverse = a;
                     break;
                 }
             }
@@ -400,21 +532,23 @@ namespace CayleyTablesFinal
                 var orders = CalculateElementOrdersOptimized(table, identity);
                 return GroupCheckResult.NotGroup(
                     "Нет обратного элемента",
-                    $"Элемент не имеет обратного",
+                    $"Элемент {elementWithoutInverse} не имеет обратного",
                     "Нет обратного элемента",
-                    "∃a ∀b: a*b ≠ e или b*a ≠ e",
+                    $"∃a={elementWithoutInverse} ∀b: a*b ≠ e или b*a ≠ e",
                     true, identity, orders);
             }
 
-            // 3. Проверка ассоциативности с кэшированием умножений
-            if (!CheckAssociativityOptimized(table, n))
+            // 3. Проверка ассоциативности с возвратом контрпримера
+            var associativityResult = CheckAssociativityWithCounterexample(table, n);
+            if (!associativityResult.IsAssociative)
             {
                 var orders = CalculateElementOrdersOptimized(table, identity);
                 return GroupCheckResult.NotGroup(
                     "Нарушена ассоциативность",
-                    "Найдена тройка (a,b,c) где (a*b)*c ≠ a*(b*c)",
+                    $"({associativityResult.A}*{associativityResult.B})*{associativityResult.C} = {associativityResult.LeftResult}, " +
+                    $"а {associativityResult.A}*({associativityResult.B}*{associativityResult.C}) = {associativityResult.RightResult}",
                     "Нарушена ассоциативность",
-                    "∃a,b,c: (a*b)*c ≠ a*(b*c)",
+                    $"∃a={associativityResult.A},b={associativityResult.B},c={associativityResult.C}: (a*b)*c ≠ a*(b*c)",
                     true, identity, orders);
             }
 
@@ -438,7 +572,71 @@ namespace CayleyTablesFinal
             return GroupCheckResult.Group(identity, elementOrders, inverses, isAbelian, isCyclic);
         }
 
-        static int[] CalculateElementOrdersOptimized(TableData table, int identity)
+        static AssociativityResult CheckAssociativityWithCounterexample(CompressedTableData table, int n)
+        {
+            // Для n=7 можно использовать быструю проверку
+            if (n == 7)
+            {
+                // Проверяем только критичные случаи
+                for (int a = 1; a < n; a++)
+                {
+                    for (int b = 1; b < n; b++)
+                    {
+                        int ab = table[a, b];
+                        for (int c = 1; c < n; c++)
+                        {
+                            int bc = table[b, c];
+                            int left = table[ab, c];
+                            int right = table[a, bc];
+                            if (left != right)
+                            {
+                                return new AssociativityResult
+                                {
+                                    IsAssociative = false,
+                                    A = a,
+                                    B = b,
+                                    C = c,
+                                    LeftResult = left,
+                                    RightResult = right
+                                };
+                            }
+                        }
+                    }
+                }
+                return new AssociativityResult { IsAssociative = true };
+            }
+
+            // Общий случай
+            for (int a = 0; a < n; a++)
+            {
+                for (int b = 0; b < n; b++)
+                {
+                    int ab = table[a, b];
+                    for (int c = 0; c < n; c++)
+                    {
+                        int bc = table[b, c];
+                        int left = table[ab, c];
+                        int right = table[a, bc];
+                        if (left != right)
+                        {
+                            return new AssociativityResult
+                            {
+                                IsAssociative = false,
+                                A = a,
+                                B = b,
+                                C = c,
+                                LeftResult = left,
+                                RightResult = right
+                            };
+                        }
+                    }
+                }
+            }
+
+            return new AssociativityResult { IsAssociative = true };
+        }
+
+        static int[] CalculateElementOrdersOptimized(CompressedTableData table, int identity)
         {
             int n = table.N;
             int[] orders = new int[n];
@@ -460,7 +658,7 @@ namespace CayleyTablesFinal
             return orders;
         }
 
-        static bool IsCyclicGroupOptimized(TableData table, int identity, int n)
+        static bool IsCyclicGroupOptimized(CompressedTableData table, int identity, int n)
         {
             // Для n=7 (простого числа) группа циклическая если есть элемент порядка 7
             if (n == 7)
@@ -505,74 +703,33 @@ namespace CayleyTablesFinal
             return false;
         }
 
-        static bool CheckAssociativityOptimized(TableData table, int n)
+        static string DetermineGroupTypeFast(bool isCyclic, bool isAbelian, int[] orders, int n)
         {
-            // Для n=7 можно использовать быструю проверку
-            if (n == 7)
+            if (isCyclic) return $"C{n} (Циклическая)";
+
+            if (n == 4 && !isCyclic && isAbelian)
             {
-                // Проверяем только критичные случаи
-                for (int a = 1; a < n; a++)
-                {
-                    for (int b = 1; b < n; b++)
-                    {
-                        int ab = table[a, b];
-                        for (int c = 1; c < n; c++)
-                        {
-                            int bc = table[b, c];
-                            if (table[ab, c] != table[a, bc])
-                                return false;
-                        }
-                    }
-                }
-                return true;
+                // Подсчитываем элементы порядка 2
+                int countOrder2 = 0;
+                for (int i = 0; i < orders.Length; i++)
+                    if (orders[i] == 2) countOrder2++;
+
+                if (countOrder2 == 3) return "V4 (Группа Клейна)";
             }
 
-            // Общий случай
-            for (int a = 0; a < n; a++)
+            if (n == 6 && !isAbelian)
             {
-                for (int b = 0; b < n; b++)
-                {
-                    int ab = table[a, b];
-                    for (int c = 0; c < n; c++)
-                    {
-                        int bc = table[b, c];
-                        if (table[ab, c] != table[a, bc])
-                            return false;
-                    }
-                }
+                int countOrder3 = 0;
+                for (int i = 0; i < orders.Length; i++)
+                    if (orders[i] == 3) countOrder3++;
+
+                if (countOrder3 >= 2) return "S3 (Симметрическая)";
             }
 
-            return true;
+            return isAbelian ? $"Абелева группа порядка {n}" : $"Неабелева группа порядка {n}";
         }
 
-        static void DebugCalculateElementOrders(int[,] table, int identity)
-        {
-            Console.WriteLine("\n=== ДЕБАГ: Порядки элементов ===");
-            Console.WriteLine($"Нейтральный элемент: {identity}");
-            Console.WriteLine("Таблица:");
-            for (int i = 0; i < n; i++)
-            {
-                Console.Write($"Строка {i}: ");
-                for (int j = 0; j < n; j++)
-                    Console.Write($"{table[i, j]} ");
-                Console.WriteLine();
-            }
-
-            Console.WriteLine("\nРасчет порядков:");
-            for (int a = 0; a < n; a++)
-            {
-                Console.Write($"Элемент {a}: ");
-                int order = 1;
-                int current = a;
-                while (current != identity && order <= n * 2)
-                {
-                    Console.Write($"{current} ");
-                    current = table[a, current];
-                    order++;
-                }
-                Console.WriteLine($"-> порядок: {(current == identity ? order : -1)}");
-            }
-        }
+        // 5. КЛАССИФИКАЦИЯ ИЗОМОРФИЗМА
 
         static ClassificationResult ClassifyGroupsCorrectly(List<GroupData> groups)
         {
@@ -651,6 +808,7 @@ namespace CayleyTablesFinal
 
             return result;
         }
+
         static bool FindDetailedIsomorphismOptimized(GroupData g1, GroupData g2, out GroupIsomorphism isomorphism)
         {
             isomorphism = null;
@@ -709,7 +867,6 @@ namespace CayleyTablesFinal
 
             return false;
         }
-
 
         static bool FindNonIsomorphismReason(GroupData g1, GroupData g2, out NonIsomorphismInfo info)
         {
@@ -777,79 +934,44 @@ namespace CayleyTablesFinal
             return true;
         }
 
-        static string DetermineGroupTypeFromProperties(bool isCyclic, bool isAbelian, int[] orders, int n)
+        static IEnumerable<int[]> GetPermutations(int[] array)
         {
-            if (isCyclic) return $"C{n} (Циклическая)";
-
-            if (n == 4 && !isCyclic && isAbelian && orders.Count(o => o == 2) == 3)
-                return "V4 (Группа Клейна)";
-
-            if (n == 6 && !isAbelian && orders.Count(o => o == 3) >= 2)
-                return "S3 (Симметрическая)";
-
-            if (n == 6 && isAbelian && orders.Contains(6))
-                return $"C{n} (Циклическая)";
-
-            if (n == 6 && isAbelian && !orders.Contains(6))
-                return "C2×C3 (Прямое произведение)";
-
-            return isAbelian ? $"Абелева группа порядка {n}" : $"Неабелева группа порядка {n}";
-        }
-
-        static int[] CalculateElementOrders(int[,] table, int identity)
-        {
-            int[] orders = new int[n];
-
-            for (int a = 0; a < n; a++)
+            if (array.Length == 1)
             {
-                int order = 1;
-                int current = a;
-
-                while (current != identity && order <= n * 2)
-                {
-                    current = table[a, current];
-                    order++;
-                }
-
-                orders[a] = (current == identity) ? order : -1;
+                yield return (int[])array.Clone();
+                yield break;
             }
 
-            return orders;
-        }
-
-        static bool IsCyclicGroup(int[,] table, int identity)
-        {
-            for (int a = 0; a < n; a++)
+            for (int i = 0; i < array.Length; i++)
             {
-                if (a == identity) continue;
+                int[] rest = new int[array.Length - 1];
+                Array.Copy(array, 0, rest, 0, i);
+                Array.Copy(array, i + 1, rest, i, array.Length - i - 1);
 
-                var generated = new HashSet<int> { a };
-                int current = a;
-
-                for (int k = 0; k < n; k++)
+                foreach (var perm in GetPermutations(rest))
                 {
-                    current = table[a, current];
-                    generated.Add(current);
-                    if (generated.Count == n) return true;
+                    int[] result = new int[array.Length];
+                    result[0] = array[i];
+                    Array.Copy(perm, 0, result, 1, perm.Length);
+                    yield return result;
                 }
             }
-
-            return false;
         }
 
-        static void SaveAllResultsWithDetailedIsomorphisms(
-            List<NonGroupData> nonGroups,
+        // 6. СОХРАНЕНИЕ РЕЗУЛЬТАТОВ
+
+        static void SaveAllResultsForGroups(
             List<GroupData> groups,
             ClassificationResult classification,
             DimensionStats dimStats)
         {
-            SaveNonGroupsFile(nonGroups);
+            // Сохраняем только файлы для групп (не группы уже сохранены)
             SaveAllGroupsFile(groups);
             SaveIsomorphismClassesFile(classification);
             SaveDetailedIsomorphismsFile(classification);
             SaveNonIsomorphismsFile(classification);
-            SaveStatisticsFile(dimStats, classification, groups.Count, nonGroups.Count);
-            SaveFullReportFile(nonGroups, groups, classification, dimStats);
+            SaveStatisticsFile(dimStats, classification, groups.Count, (int)dimStats.NonGroups);
+            SaveFullReportFile(groups, classification, dimStats);
         }
 
         static void SaveNonGroupsFile(List<NonGroupData> nonGroups)
@@ -876,7 +998,7 @@ namespace CayleyTablesFinal
                 writer.WriteLine($"├{new string('─', 58)}┤");
 
                 writer.WriteLine("│ Таблица Кэли:                                                      │");
-                writer.WriteLine(FormatTableForFile(ng.Table is TableData ? (object)ng.Table : ng.Table.To2DArray()));
+                writer.WriteLine(FormatTableForFile(ng.Table is CompressedTableData ? (object)ng.Table : ng.Table.To2DArray()));
 
                 writer.WriteLine($"│ ПРИЧИНА: {ng.FailedReason,-47}│");
                 writer.WriteLine($"│ Пример: {ng.FailedExample,-49}│");
@@ -938,7 +1060,7 @@ namespace CayleyTablesFinal
                 writer.WriteLine($"├{new string('─', 58)}┤");
 
                 writer.WriteLine("│ Таблица Кэли:                                                      │");
-                writer.WriteLine(FormatTableForFile(g.Table is TableData ? (object)g.Table : g.Table.To2DArray()));
+                writer.WriteLine(FormatTableForFile(g.Table is CompressedTableData ? (object)g.Table : g.Table.To2DArray()));
 
                 writer.WriteLine($"│ СВОЙСТВА ГРУППЫ:                                                  │");
                 writer.WriteLine($"│   • Нейтральный элемент: {g.Identity,-39}│");
@@ -1257,7 +1379,6 @@ namespace CayleyTablesFinal
         }
 
         static void SaveFullReportFile(
-            List<NonGroupData> nonGroups,
             List<GroupData> groups,
             ClassificationResult classification,
             DimensionStats dimStats)
@@ -1276,8 +1397,8 @@ namespace CayleyTablesFinal
 
             writer.WriteLine("1. СТАТИСТИКА");
             writer.WriteLine(new string('=', 60));
-            writer.WriteLine($"Всего таблиц построено:      {groups.Count + nonGroups.Count:N0}");
-            writer.WriteLine($"Не являются группами:        {nonGroups.Count:N0}");
+            writer.WriteLine($"Всего таблиц построено:      {dimStats.TotalTables:N0}");
+            writer.WriteLine($"Не являются группами:        {dimStats.NonGroups:N0}");
             writer.WriteLine($"Являются группами:           {groups.Count:N0}");
             writer.WriteLine($"Классов изоморфизма:         {classification.Classes.Count:N0}");
             writer.WriteLine($"Время обработки:             {dimensionTimer.Elapsed.TotalSeconds:F2} сек");
@@ -1308,101 +1429,91 @@ namespace CayleyTablesFinal
                 }
                 writer.WriteLine();
             }
-
-            writer.WriteLine("4. ТАБЛИЦЫ, НЕ ЯВЛЯЮЩИЕСЯ ГРУППАМИ");
-            writer.WriteLine(new string('=', 60));
-            writer.WriteLine();
-
-            if (nonGroups.Count == 0)
-            {
-                writer.WriteLine("Все таблицы являются группами.");
-            }
-            else
-            {
-                writer.WriteLine($"Найдено {nonGroups.Count} таблиц, не являющихся группами.");
-                writer.WriteLine("Примеры (первые 5):");
-                writer.WriteLine();
-
-                foreach (var ng in nonGroups.Take(5))
-                {
-                    writer.WriteLine($"Таблица #{ng.Id}: {ng.FailedReason}");
-                    writer.WriteLine($"  {ng.FailedExample}");
-                    writer.WriteLine();
-                }
-            }
         }
 
         static string FormatTableForFile(object table)
         {
-            int[,] table2D = null;
-            TableData tableData = null;
-            int n;
+            var sb = new StringBuilder();
+            // Добавляем ветку для CompressedTableData
+            if (table is CompressedTableData ctd)
+            {
+                int n = ctd.N;
 
-            if (table is int[,] t2d)
-            {
-                table2D = t2d;
-                n = table2D.GetLength(0);
-            }
-            else if (table is TableData td)
-            {
-                tableData = td;
-                n = tableData.N;
-            }
-            else
-            {
-                return "Неизвестный тип таблицы";
-            }
+                sb.Append("│ ");
+                sb.Append("    ");
+                for (int j = 0; j < n; j++) sb.Append($"{j,3}");
+                sb.Append(new string(' ', 58 - (4 + n * 3) - 2)).Append("│").AppendLine();
 
+                sb.Append("│ ");
+                sb.Append("   ┌");
+                sb.Append(new string('─', n * 3));
+                sb.Append(new string(' ', 58 - (3 + n * 3) - 2)).Append("│").AppendLine();
+
+                for (int i = 0; i < n; i++)
+                {
+                    sb.Append("│ ");
+                    sb.Append($"{i,3} │");
+                    for (int j = 0; j < n; j++)
+                    {
+                        sb.Append($"{ctd[i, j],3}");
+                    }
+                    sb.Append(new string(' ', 58 - (6 + n * 3) - 2)).Append("│").AppendLine();
+                }
+
+            }
+            return sb.ToString();
+
+
+        }
+
+        static string FormatNonGroupToString(CompressedTableData table, GroupCheckResult result,
+            long nonGroupId, int n)
+        {
             var sb = new StringBuilder();
 
-            sb.Append("│ ");
-            sb.Append("    ");
-            for (int j = 0; j < n; j++) sb.Append($"{j,3}");
-            sb.Append(new string(' ', 58 - (4 + n * 3) - 2)).Append("│").AppendLine();
+            sb.AppendLine($"┌{new string('─', 58)}┐");
+            sb.AppendLine($"│ ТАБЛИЦА #{nonGroupId,-4}                                                  │");
+            sb.AppendLine($"├{new string('─', 58)}┤");
 
-            sb.Append("│ ");
-            sb.Append("   ┌");
-            sb.Append(new string('─', n * 3));
-            sb.Append(new string(' ', 58 - (3 + n * 3) - 2)).Append("│").AppendLine();
+            sb.AppendLine("│ Таблица Кэли:                                                      │");
+            sb.Append(FormatTableForFile(table));
 
-            for (int i = 0; i < n; i++)
+            sb.AppendLine($"│ ПРИЧИНА: {result.FailedReason,-47}│");
+            sb.AppendLine($"│ Пример: {result.FailedExample,-49}│");
+            sb.AppendLine($"│ Аксиома: {result.FailedAxiom,-48}│");
+            sb.AppendLine("│                                                                      │");
+
+            if (result.HasIdentity)
             {
-                sb.Append("│ ");
-                sb.Append($"{i,3} │");
-                for (int j = 0; j < n; j++)
-                {
-                    int value = table2D != null ? table2D[i, j] : tableData[i, j];
-                    sb.Append($"{value,3}");
-                }
-                sb.Append(new string(' ', 58 - (6 + n * 3) - 2)).Append("│").AppendLine();
+                sb.AppendLine($"│ Нейтральный элемент: {result.Identity,-39}│");
             }
+
+            if (result.ElementOrders != null && result.ElementOrders.Length > 0)
+            {
+                sb.AppendLine("│ Порядки элементов:                                                │");
+                for (int row = 0; row < (n + 3) / 4; row++)
+                {
+                    var line = new StringBuilder("│   ");
+                    for (int col = 0; col < 4; col++)
+                    {
+                        int idx = row * 4 + col;
+                        if (idx < n)
+                        {
+                            line.Append($"{idx}:{result.ElementOrders[idx]}  ");
+                        }
+                    }
+                    line.Append(new string(' ', 58 - line.Length + 1)).Append("│");
+                    sb.AppendLine(line.ToString());
+                }
+            }
+
+            sb.AppendLine($"└{new string('─', 58)}┘");
+            sb.AppendLine();
 
             return sb.ToString();
         }
 
-        static IEnumerable<int[]> GetPermutations(int[] array)
-        {
-            if (array.Length == 1)
-            {
-                yield return (int[])array.Clone();
-                yield break;
-            }
-
-            for (int i = 0; i < array.Length; i++)
-            {
-                int[] rest = new int[array.Length - 1];
-                Array.Copy(array, 0, rest, 0, i);
-                Array.Copy(array, i + 1, rest, i, array.Length - i - 1);
-
-                foreach (var perm in GetPermutations(rest))
-                {
-                    int[] result = new int[array.Length];
-                    result[0] = array[i];
-                    Array.Copy(perm, 0, result, 1, perm.Length);
-                    yield return result;
-                }
-            }
-        }
+        // 7. ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ
 
         static void LogError(int dimension, Exception ex)
         {
@@ -1414,24 +1525,274 @@ namespace CayleyTablesFinal
                 $"StackTrace:\n{ex.StackTrace}");
         }
 
+        // 8. ВНУТРЕННИЕ КЛАССЫ
+
+        class ProgressTracker
+        {
+            private long _processed = 0;
+            private readonly long _total;
+            private readonly string _phase;
+            private readonly DateTime _startTime;
+            private DateTime _lastUpdate;
+            private int _lastPercentage = -1;
+            private readonly object _lock = new object();
+
+            public ProgressTracker(long total, string phase)
+            {
+                _total = total;
+                _phase = phase;
+                _startTime = DateTime.Now;
+                _lastUpdate = _startTime;
+            }
+
+            public void Increment()
+            {
+                long current = Interlocked.Increment(ref _processed);
+
+                // Обновляем только каждые 0.1% или каждую секунду
+                int percentage = (int)((double)current / _total * 1000); // 0.1% точность
+                DateTime now = DateTime.Now;
+
+                lock (_lock)
+                {
+                    if (percentage != _lastPercentage || (now - _lastUpdate).TotalSeconds >= 1)
+                    {
+                        _lastUpdate = now;
+                        _lastPercentage = percentage;
+
+                        double actualPercentage = percentage / 10.0;
+                        Console.Write($"\r   {_phase}: {current:N0}/{_total:N0} ({actualPercentage:F1}%)");
+
+                        // Оценка оставшегося времени (после 1000 элементов)
+                        if (current > 1000 && actualPercentage > 0)
+                        {
+                            TimeSpan elapsed = now - _startTime;
+                            double secondsPerItem = elapsed.TotalSeconds / current;
+                            double remainingSeconds = secondsPerItem * (_total - current);
+                            TimeSpan remaining = TimeSpan.FromSeconds(remainingSeconds);
+
+                            Console.Write($" [Осталось: {remaining:hh\\:mm\\:ss}]");
+                        }
+                    }
+                }
+            }
+
+            public void Complete()
+            {
+                lock (_lock)
+                {
+                    TimeSpan elapsed = DateTime.Now - _startTime;
+                    Console.Write($"\r   {_phase}: {_total:N0}/{_total:N0} (100%) [Готово за {elapsed:mm\\:ss}]\n");
+                }
+            }
+        }
+
+        class AsyncFileWriter : IDisposable
+        {
+            private readonly ConcurrentQueue<string> _writeQueue = new ConcurrentQueue<string>();
+            private readonly Task _writerTask;
+            private readonly CancellationTokenSource _cancellationTokenSource = new CancellationTokenSource();
+            private readonly string _filePath;
+            private readonly int _bufferSize;
+            private long _totalWritten = 0;
+            private bool _isDisposed = false;
+
+            public AsyncFileWriter(string filePath, int bufferSize = 1000)
+            {
+                _filePath = filePath;
+                _bufferSize = bufferSize;
+
+                // Создаем файл и пишем заголовок синхронно
+                using (var writer = new StreamWriter(filePath, false, Encoding.UTF8))
+                {
+                    writer.WriteLine("╔══════════════════════════════════════════════════════════╗");
+                    writer.WriteLine("║                ТАБЛИЦЫ, НЕ ЯВЛЯЮЩИЕСЯ ГРУППАМИ           ║");
+                    writer.WriteLine("║                   (с подробным объяснением)              ║");
+                    writer.WriteLine("╚══════════════════════════════════════════════════════════╝");
+                    writer.WriteLine();
+                }
+
+                // Запускаем фоновую задачу записи
+                _writerTask = Task.Run(() => WriteLoopAsync(_cancellationTokenSource.Token));
+            }
+
+            public void EnqueueWrite(string content)
+            {
+                if (!_isDisposed)
+                {
+                    _writeQueue.Enqueue(content);
+                }
+            }
+
+            public async Task WaitForCompletionAsync()
+            {
+                // Даем время на обработку оставшихся элементов
+                int attempts = 0;
+                while (!_writeQueue.IsEmpty && attempts < 100) // максимум 10 секунд
+                {
+                    await Task.Delay(100);
+                    attempts++;
+                }
+
+                _cancellationTokenSource.Cancel();
+
+                try
+                {
+                    await _writerTask;
+                }
+                catch (OperationCanceledException)
+                {
+                    // Ожидаемое исключение
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"\nОшибка при завершении записи: {ex.Message}");
+                }
+            }
+
+            private async Task WriteLoopAsync(CancellationToken cancellationToken)
+            {
+                var buffer = new List<string>(_bufferSize);
+
+                try
+                {
+                    while (!cancellationToken.IsCancellationRequested || !_writeQueue.IsEmpty)
+                    {
+                        // Собираем элементы в буфер
+                        while (buffer.Count < _bufferSize && _writeQueue.TryDequeue(out var item))
+                        {
+                            buffer.Add(item);
+                        }
+
+                        // Если буфер заполнен или очередь пуста и токен отменен
+                        if (buffer.Count > 0 && (buffer.Count >= _bufferSize ||
+                            (cancellationToken.IsCancellationRequested && _writeQueue.IsEmpty)))
+                        {
+                            await WriteBufferToFileAsync(buffer);
+                            buffer.Clear();
+                        }
+                        else if (_writeQueue.IsEmpty && !cancellationToken.IsCancellationRequested)
+                        {
+                            // Используем WaitAsync вместо Delay с токеном
+                            try
+                            {
+                                await Task.Delay(50, cancellationToken);
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                // Ожидаемое исключение при отмене
+                                break;
+                            }
+                        }
+                    }
+
+                    // Записываем оставшееся
+                    if (buffer.Count > 0)
+                    {
+                        await WriteBufferToFileAsync(buffer);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"\nОшибка в WriteLoopAsync: {ex.Message}");
+                }
+            }
+
+            private async Task WriteBufferToFileAsync(List<string> buffer)
+            {
+                try
+                {
+                    using (var writer = new StreamWriter(_filePath, true, Encoding.UTF8))
+                    {
+                        foreach (var item in buffer)
+                        {
+                            await writer.WriteAsync(item);
+                        }
+                    }
+
+                    Interlocked.Add(ref _totalWritten, buffer.Count);
+
+                    // Периодически выводим статистику
+                    if (_totalWritten % 10000 == 0)
+                    {
+                        Console.Write($"\r   Записано не групп: {_totalWritten:N0} (очередь: {_writeQueue.Count})");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"\nОшибка записи в файл: {ex.Message}");
+                }
+            }
+
+            public void Dispose()
+            {
+                if (!_isDisposed)
+                {
+                    _isDisposed = true;
+                    try
+                    {
+                        WaitForCompletionAsync().GetAwaiter().GetResult();
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"\nОшибка при закрытии файлового писателя: {ex.Message}");
+                    }
+                    finally
+                    {
+                        _cancellationTokenSource.Dispose();
+                    }
+                }
+            }
+        }
+
         // ==================== КЛАССЫ ДЛЯ ХРАНЕНИЯ ДАННЫХ ====================
 
-        class GroupData
+        public class CompressedTableData
         {
-            public int Id { get; set; }
-            public TableData Table { get; set; } // Заменяем int[,] на TableData
-            public int Identity { get; set; }
-            public bool IsAbelian { get; set; }
-            public bool IsCyclic { get; set; }
-            public string GroupType { get; set; }
-            public int[] ElementOrders { get; set; }
-            public int[] Inverses { get; set; }
+            private readonly byte[] _data;
+            public int N { get; }
+
+            public CompressedTableData(int n, int[,] table)
+            {
+                N = n;
+                _data = new byte[n * n];
+
+                // Копируем данные один раз при создании
+                for (int i = 0; i < n; i++)
+                    for (int j = 0; j < n; j++)
+                        _data[i * n + j] = (byte)table[i, j]; // Приведение к byte
+            }
+
+            public int this[int i, int j]
+            {
+                get => _data[i * N + j]; // Автоматическое приведение byte→int
+                private set => _data[i * N + j] = (byte)value; // Приведение int→byte
+            }
+
+            // Для отладки и сохранения
+            public int[,] To2DArray()
+            {
+                var result = new int[N, N];
+                for (int i = 0; i < N; i++)
+                    for (int j = 0; j < N; j++)
+                        result[i, j] = _data[i * N + j];
+                return result;
+            }
+
+            // Сравнение для изоморфизма
+            public int[] GetDataCopy()
+            {
+                var copy = new int[_data.Length];
+                for (int i = 0; i < _data.Length; i++)
+                    copy[i] = _data[i];
+                return copy;
+            }
         }
 
         class NonGroupData
         {
             public int Id { get; set; }
-            public TableData Table { get; set; } // Заменяем int[,] на TableData
+            public CompressedTableData Table { get; set; }
             public string FailedReason { get; set; }
             public string FailedDetails { get; set; }
             public string FailedAxiom { get; set; }
@@ -1441,35 +1802,16 @@ namespace CayleyTablesFinal
             public int[] ElementOrders { get; set; }
         }
 
-        class GroupIsomorphism
-        {
-            public GroupData FromGroup { get; set; }
-            public GroupData ToGroup { get; set; }
-            public int[] Permutation { get; set; }
-            public int[] InversePermutation { get; set; }
-            public string VerificationDetails { get; set; }
-            public List<string> FailedPairs { get; set; }
-        }
-
-        class NonIsomorphismInfo
-        {
-            public string Reason { get; set; }
-            public string Details { get; set; }
-            public string Counterexample { get; set; }
-        }
-
-        class IsomorphismClass
+        class GroupData
         {
             public int Id { get; set; }
+            public CompressedTableData Table { get; set; }
+            public int Identity { get; set; }
+            public bool IsAbelian { get; set; }
+            public bool IsCyclic { get; set; }
             public string GroupType { get; set; }
-            public GroupData Representative { get; set; }
-            public List<GroupData> Groups { get; set; }
-            public List<GroupIsomorphism> Isomorphisms { get; set; } = new List<GroupIsomorphism>();
-        }
-
-        class ClassificationResult
-        {
-            public List<IsomorphismClass> Classes { get; set; } = new List<IsomorphismClass>();
+            public int[] ElementOrders { get; set; }
+            public int[] Inverses { get; set; }
         }
 
         class GroupCheckResult
@@ -1515,6 +1857,47 @@ namespace CayleyTablesFinal
                 };
         }
 
+        class AssociativityResult
+        {
+            public bool IsAssociative { get; set; }
+            public int A { get; set; }
+            public int B { get; set; }
+            public int C { get; set; }
+            public int LeftResult { get; set; }
+            public int RightResult { get; set; }
+        }
+
+        class GroupIsomorphism
+        {
+            public GroupData FromGroup { get; set; }
+            public GroupData ToGroup { get; set; }
+            public int[] Permutation { get; set; }
+            public int[] InversePermutation { get; set; }
+            public string VerificationDetails { get; set; }
+            public List<string> FailedPairs { get; set; }
+        }
+
+        class NonIsomorphismInfo
+        {
+            public string Reason { get; set; }
+            public string Details { get; set; }
+            public string Counterexample { get; set; }
+        }
+
+        class IsomorphismClass
+        {
+            public int Id { get; set; }
+            public string GroupType { get; set; }
+            public GroupData Representative { get; set; }
+            public List<GroupData> Groups { get; set; }
+            public List<GroupIsomorphism> Isomorphisms { get; set; } = new List<GroupIsomorphism>();
+        }
+
+        class ClassificationResult
+        {
+            public List<IsomorphismClass> Classes { get; set; } = new List<IsomorphismClass>();
+        }
+
         class DimensionStats
         {
             public int Dimension { get; set; }
@@ -1523,5 +1906,6 @@ namespace CayleyTablesFinal
             public long NonGroups { get; set; }
             public long IsomorphismClasses { get; set; }
         }
+
     }
 }
